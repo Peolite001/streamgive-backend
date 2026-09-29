@@ -43,6 +43,19 @@ describe('handleDonationVaultEvent', () => {
     // Never went through ngo-registry — placeholder, unverified.
     const ngoRow = await prisma.ngo.findUnique({ where: { ownerAddress: ngo } });
     expect(ngoRow?.verified).toBe(false);
+
+    // A StreamEvent row must be written atomically with the stream upsert.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'created' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.streamId).toBe(1n);
+    expect(streamEvent?.ledger).toBe(100);
+    expect(streamEvent?.txHash).toBe(
+      'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    );
+    expect(streamEvent?.payload).toMatchObject({
+      deposit: '1000',
+      rate: '10',
+    });
   });
 
   it('applies a withdraw event as a balance/withdrawn delta', async () => {
@@ -67,6 +80,13 @@ describe('handleDonationVaultEvent', () => {
     const stream = await prisma.stream.findUnique({ where: { onChainId: 2n } });
     expect(stream?.balance).toBe('500');
     expect(stream?.withdrawn).toBe('500');
+
+    // A StreamEvent row must be written atomically with the stream update.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'withdraw' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.streamId).toBe(2n);
+    expect(streamEvent?.ledger).toBe(100);
+    expect(streamEvent?.payload).toMatchObject({ accrued: '500' });
   });
 
   it('applies a cancel event: settles accrued, zeroes balance/rate, marks cancelled', async () => {
@@ -97,6 +117,13 @@ describe('handleDonationVaultEvent', () => {
     expect(stream?.rate).toBe('0');
     expect(stream?.withdrawn).toBe('500'); // 200 already withdrawn + 300 settled on cancel
     expect(stream?.status).toBe('CANCELLED');
+
+    // A StreamEvent row must be written atomically with the stream update.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'cancel' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.streamId).toBe(3n);
+    expect(streamEvent?.ledger).toBe(100);
+    expect(streamEvent?.payload).toMatchObject({ accrued: '300', refund: '700' });
   });
 
   it('ignores topup/ratemod events rather than corrupting balance (documented gap)', async () => {
@@ -120,5 +147,9 @@ describe('handleDonationVaultEvent', () => {
 
     const stream = await prisma.stream.findUnique({ where: { onChainId: 4n } });
     expect(stream?.balance).toBe('1000'); // unchanged — see the handler's comment
+
+    // topup is intentionally unhandled — no StreamEvent row should be written.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'topup' } });
+    expect(streamEvent).toBeNull();
   });
 });

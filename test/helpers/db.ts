@@ -4,6 +4,7 @@ import { prisma } from '../../src/db.js';
 
 /** Truncates every table. Call between tests so fixtures never leak across them. */
 export async function resetDb(): Promise<void> {
+  await prisma.streamEvent.deleteMany();
   await prisma.stream.deleteMany();
   await prisma.donor.deleteMany();
   await prisma.ngo.deleteMany();

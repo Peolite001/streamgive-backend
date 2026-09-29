@@ -104,3 +104,28 @@ model IndexerCheckpoint {
 
   @@map("indexer_checkpoints")
 }
+
+/// Immutable audit log of every on-chain contract event the indexer has
+/// processed. One row per event, written in the same transaction as the
+/// state update it triggered. Enables activity feeds, balance-drift
+/// debugging, and idempotent reprocessing.
+model StreamEvent {
+  id        String   @id @default(uuid())
+  /// Discriminator matching the contract topic: "created" | "withdraw" |
+  /// "cancel" | "register" | "approved" | "revoked".
+  type      String
+  /// On-chain stream id (donation-vault events); null for registry events.
+  streamId  BigInt?  @map("stream_id")
+  /// Ledger sequence number the event was included in.
+  ledger    Int
+  /// Transaction hash that contained the event.
+  txHash    String   @map("tx_hash")
+  /// Full event payload serialised to JSON for auditing and replay.
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([streamId])
+  @@index([type])
+  @@index([ledger])
+  @@map("stream_events")
+}
