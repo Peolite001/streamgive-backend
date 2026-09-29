@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { Keypair } from '@stellar/stellar-sdk';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { prisma } from '../../src/db.js';
 import { buildServer } from '../../src/server.js';
+import { signAdminRequest } from '../helpers/adminAuth.js';
 import { fakeAddress, resetDb } from '../helpers/db.js';
+
+const adminKeypair = Keypair.random();
 
 describe('GET /ngos', () => {
   afterEach(async () => {
@@ -325,6 +329,60 @@ describe('GET /ngos/:id', () => {
     expect(body.description).toBeNull();
     expect(body.website).toBeNull();
     expect(body.country).toBeNull();
+
+    await app.close();
+  });
+});
+
+describe('PATCH /admin/ngos/:id', () => {
+  beforeAll(() => {
+    process.env.ADMIN_ADDRESS = adminKeypair.publicKey();
+  });
+
+  afterEach(async () => {
+    await resetDb();
+  });
+
+  it('allows admin to update displayName', async () => {
+    const app = buildServer();
+
+    const ngo = await prisma.ngo.create({
+      data: { ownerAddress: fakeAddress('X'), name: 'Original Name', verified: true },
+    });
+
+    const url = `/admin/ngos/${ngo.id}`;
+    const headers = signAdminRequest(adminKeypair, 'PATCH', url);
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url,
+      headers,
+      payload: { displayName: 'Better Name' },
+    });
+    expect(response.statusCode).toBe(200);
+    
+    const body = response.json();
+    expect(body.name).toBe('Better Name');
+
+    const stored = await prisma.ngo.findUnique({ where: { id: ngo.id } });
+    expect(stored?.displayName).toBe('Better Name');
+
+    await app.close();
+  });
+
+  it('rejects without admin auth', async () => {
+    const app = buildServer();
+
+    const ngo = await prisma.ngo.create({
+      data: { ownerAddress: fakeAddress('Y'), name: 'Name', verified: true },
+    });
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/admin/ngos/${ngo.id}`,
+      payload: { displayName: 'Hacked Name' },
+    });
+    expect(response.statusCode).toBe(401);
 
     await app.close();
   });
