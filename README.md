@@ -56,9 +56,11 @@ ledger, not from the contract's history).
 
 **Admin routes return 503**
 
-`ADMIN_ADDRESS` is unset. The admin review endpoints refuse all requests
-until it's configured — set it to the Stellar public key (`G...`) that
-matches the `admin` configured on the deployed contracts. See
+neither `ADMIN_ADDRESS` nor `ADMIN_ADDRESSES` is set. The admin review
+endpoints refuse all requests until at least one is configured — set
+`ADMIN_ADDRESS` to the Stellar public key (`G...`) that matches the
+`admin` configured on the deployed contracts, or `ADMIN_ADDRESSES` to a
+comma-separated list when more than one key needs admin access. See
 [ENVIRONMENT.md](./ENVIRONMENT.md).
 ## Indexer
 
