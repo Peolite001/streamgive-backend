@@ -7,7 +7,7 @@ async function notifyWebhook(event: NotificationEvent): Promise<void> {
   if (!webhookUrl) return;
 
   try {
-    await fetch(webhookUrl, {
+    const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(event),

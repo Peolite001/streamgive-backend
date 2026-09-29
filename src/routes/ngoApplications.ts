@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../generated/prisma/client.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
@@ -163,14 +163,6 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
         }
         throw err;
       }
-      if (application.status !== 'PENDING') {
-        return reply.code(409).send({ error: 'already_reviewed' });
-      }
-
-      return await prisma.ngoApplication.update({
-        where: { id },
-        data: { status: 'APPROVED', reviewNote: parsed.data.reviewNote },
-      });
     },
   );
 
@@ -200,14 +192,6 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
         }
         throw err;
       }
-      if (application.status !== 'PENDING') {
-        return reply.code(409).send({ error: 'already_reviewed' });
-      }
-
-      return await prisma.ngoApplication.update({
-        where: { id },
-        data: { status: 'REJECTED', reviewNote: parsed.data.reviewNote },
-      });
     },
   );
 }

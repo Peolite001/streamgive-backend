@@ -65,8 +65,10 @@ describe('worker bootstrap (no existing checkpoint)', () => {
     const { startIndexer } = await freshWorker();
     await runWorkerBriefly(startIndexer);
 
-    expect(checkpoint.saveCheckpoint).toHaveBeenCalledWith(1000);
-    expect(rpc.getLatestLedgerSequence).not.toHaveBeenCalled();
+    // The first checkpoint written must come from INDEXER_START_LEDGER, not
+    // from the chain head — later polls do consult the latest ledger, so we
+    // assert on the *first* checkpoint rather than on total call counts.
+    expect(checkpoint.saveCheckpoint).toHaveBeenNthCalledWith(1, 1000);
   });
 
   it('falls back to the latest ledger when INDEXER_START_LEDGER is not set', async () => {

@@ -1,6 +1,6 @@
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
-import Fastify from 'fastify';
+import Fastify, { type FastifyError } from 'fastify';
 
 import { prisma } from './db.js';
 import { impactRoutes } from './routes/impact.js';
@@ -25,7 +25,7 @@ export function buildServer() {
     },
   });
 
-  app.setErrorHandler((error, request, reply) => {
+  app.setErrorHandler((error: FastifyError, request, reply) => {
     request.log.error(error);
     const statusCode =
       error.statusCode && error.statusCode >= 400 && error.statusCode < 600
@@ -62,11 +62,29 @@ export function buildServer() {
   app.register(rateLimit, {
     max: Number(process.env.RATE_LIMIT_MAX ?? 100),
     timeWindow: process.env.RATE_LIMIT_WINDOW ?? '1 minute',
+    // Spell the headers out instead of leaning on the plugin's defaults:
+    // `Retry-After` is the machine-readable contract clients back off on
+    // (RFC 9110 §10.2.3), and the `x-ratelimit-*` headers let a client see
+    // its remaining budget before it is throttled.
+    addHeaders: {
+      'x-ratelimit-limit': true,
+      'x-ratelimit-remaining': true,
+      'x-ratelimit-reset': true,
+      'retry-after': true,
+    },
   });
 
-  app.get('/health', async () => {
-    await prisma.$queryRaw`SELECT 1`;
-    return { status: 'ok' };
+  // Registered from inside a plugin rather than directly on the root
+  // instance. @fastify/rate-limit attaches the global limit through an
+  // `onRoute` hook that only exists once the plugin has booted, and a route
+  // declared directly on the root is added synchronously *before* that — so
+  // `/health` used to be added first and silently bypass the limiter
+  // entirely (no 429, and therefore no Retry-After).
+  app.register(async function healthRoutes(instance) {
+    instance.get('/health', async () => {
+      await prisma.$queryRaw`SELECT 1`;
+      return { status: 'ok' };
+    });
   });
 
   app.register(ngoRoutes);

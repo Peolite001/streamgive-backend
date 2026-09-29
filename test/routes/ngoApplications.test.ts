@@ -4,7 +4,6 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { prisma } from '../../src/db.js';
 import { buildServer } from '../../src/server.js';
 import { fakeAddress, resetDb } from '../helpers/db.js';
-import { sep53Hash } from '../../src/middleware/adminAuth.js';
 import { signAdminRequest } from '../helpers/adminAuth.js';
 
 const adminKeypair = Keypair.random();
