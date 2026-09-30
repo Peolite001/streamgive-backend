@@ -1,5 +1,7 @@
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import Fastify from 'fastify';
 
 import { prisma } from './db.js';
@@ -24,6 +26,29 @@ export function buildServer() {
       transport: USE_PRETTY_LOGS ? { target: 'pino-pretty' } : undefined,
     },
   });
+
+  app.register(swagger, {
+    openapi: {
+      info: {
+        title: 'StreamGive API',
+        description: 'Public API for StreamGive streams, NGOs, and impact data.',
+        version: '1.0.0',
+      },
+      tags: [
+        { name: 'Health', description: 'Service health' },
+        { name: 'Streams', description: 'Public donation stream data' },
+        { name: 'NGOs', description: 'Public NGO directory and profiles' },
+        { name: 'Impact', description: 'Public platform and NGO impact metrics' },
+      ],
+    },
+  });
+
+  if (process.env.NODE_ENV !== 'production') {
+    app.register(swaggerUi, {
+      routePrefix: '/docs',
+      uiConfig: { docExpansion: 'list', deepLinking: true },
+    });
+  }
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error(error);
@@ -64,10 +89,26 @@ export function buildServer() {
     timeWindow: process.env.RATE_LIMIT_WINDOW ?? '1 minute',
   });
 
-  app.get('/health', async () => {
-    await prisma.$queryRaw`SELECT 1`;
-    return { status: 'ok' };
-  });
+  app.get(
+    '/health',
+    {
+      schema: {
+        tags: ['Health'],
+        summary: 'Check API and database health',
+        response: {
+          200: {
+            type: 'object',
+            properties: { status: { type: 'string', const: 'ok' } },
+            required: ['status'],
+          },
+        },
+      },
+    },
+    async () => {
+      await prisma.$queryRaw`SELECT 1`;
+      return { status: 'ok' };
+    },
+  );
 
   app.register(ngoRoutes);
   app.register(streamRoutes);

@@ -17,9 +17,7 @@ const listQuerySchema = z.object({
 
 const lookupQuerySchema = z.object({
   // Stellar StrKey ed25519 public key: 'G' + 55 base32 (A-Z2-7) chars.
-  address: z
-    .string()
-    .regex(/^G[A-Z2-7]{55}$/),
+  address: z.string().regex(/^G[A-Z2-7]{55}$/),
 });
 
 /** Builds the GET /ngos/:id response shape from a unique Prisma `where`. */
@@ -77,66 +75,115 @@ async function findNgoDetail(where: { id: string } | { ownerAddress: string }) {
 }
 
 export async function ngoRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/ngos', async (request, reply) => {
-    const parsedQuery = listQuerySchema.safeParse(request.query);
-    if (!parsedQuery.success) {
-      return reply
-        .code(400)
-        .send({ error: 'invalid_request', details: parsedQuery.error.flatten() });
-    }
-    const { limit, cursor, sort, q } = parsedQuery.data;
-
-    const orderBy: { createdAt: 'asc' | 'desc' } | { name: 'asc' } =
-      sort === 'oldest'
-        ? { createdAt: 'asc' }
-        : sort === 'name'
-          ? { name: 'asc' }
-          : { createdAt: 'desc' };
-
-    const rows = await prisma.ngo.findMany({
-      where: {
-        verified: true,
-        ...(q ? { name: { contains: q, mode: 'insensitive' } } : {}),
+  app.get(
+    '/ngos',
+    {
+      schema: {
+        tags: ['NGOs'],
+        summary: 'List verified NGOs',
+        querystring: {
+          type: 'object',
+          properties: {
+            limit: { type: 'integer', minimum: 1, maximum: 100, default: 100 },
+            cursor: { type: 'string', format: 'uuid' },
+            sort: { type: 'string', enum: ['newest', 'oldest', 'name'], default: 'newest' },
+            q: { type: 'string', maxLength: 100 },
+          },
+        },
+        response: { 200: { type: 'object', additionalProperties: true } },
       },
-      orderBy,
-      take: limit + 1,
-      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
-    });
+    },
+    async (request, reply) => {
+      const parsedQuery = listQuerySchema.safeParse(request.query);
+      if (!parsedQuery.success) {
+        return reply
+          .code(400)
+          .send({ error: 'invalid_request', details: parsedQuery.error.flatten() });
+      }
+      const { limit, cursor, sort, q } = parsedQuery.data;
 
-    const hasMore = rows.length > limit;
-    const ngos = hasMore ? rows.slice(0, limit) : rows;
-    const nextCursor = hasMore ? ngos[ngos.length - 1].id : null;
+      const orderBy: { createdAt: 'asc' | 'desc' } | { name: 'asc' } =
+        sort === 'oldest'
+          ? { createdAt: 'asc' }
+          : sort === 'name'
+            ? { name: 'asc' }
+            : { createdAt: 'desc' };
 
-    return { ngos, nextCursor };
-  });
+      const rows = await prisma.ngo.findMany({
+        where: {
+          verified: true,
+          ...(q ? { name: { contains: q, mode: 'insensitive' } } : {}),
+        },
+        orderBy,
+        take: limit + 1,
+        ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+      });
 
-  app.get('/ngos/lookup', async (request, reply) => {
-    const parsedQuery = lookupQuerySchema.safeParse(request.query);
-    if (!parsedQuery.success) {
-      return reply
-        .code(400)
-        .send({ error: 'invalid_request', details: parsedQuery.error.flatten() });
-    }
+      const hasMore = rows.length > limit;
+      const ngos = hasMore ? rows.slice(0, limit) : rows;
+      const nextCursor = hasMore ? ngos[ngos.length - 1].id : null;
 
-    const ngo = await findNgoDetail({ ownerAddress: parsedQuery.data.address });
-    if (!ngo) {
-      return reply.code(404).send({ error: 'not_found' });
-    }
+      return { ngos, nextCursor };
+    },
+  );
 
-    return ngo;
-  });
+  app.get(
+    '/ngos/lookup',
+    {
+      schema: {
+        tags: ['NGOs'],
+        summary: 'Find an NGO by Stellar address',
+        querystring: {
+          type: 'object',
+          properties: { address: { type: 'string', pattern: '^G[A-Z2-7]{55}$' } },
+          required: ['address'],
+        },
+        response: { 200: { type: 'object', additionalProperties: true } },
+      },
+    },
+    async (request, reply) => {
+      const parsedQuery = lookupQuerySchema.safeParse(request.query);
+      if (!parsedQuery.success) {
+        return reply
+          .code(400)
+          .send({ error: 'invalid_request', details: parsedQuery.error.flatten() });
+      }
 
-  app.get('/ngos/:id', async (request, reply) => {
-    const parsedParams = idParamSchema.safeParse(request.params);
-    if (!parsedParams.success) {
-      return reply.code(400).send({ error: 'invalid_request' });
-    }
+      const ngo = await findNgoDetail({ ownerAddress: parsedQuery.data.address });
+      if (!ngo) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
 
-    const ngo = await findNgoDetail({ id: parsedParams.data.id });
-    if (!ngo) {
-      return reply.code(404).send({ error: 'not_found' });
-    }
+      return ngo;
+    },
+  );
 
-    return ngo;
-  });
+  app.get(
+    '/ngos/:id',
+    {
+      schema: {
+        tags: ['NGOs'],
+        summary: 'Get an NGO profile and impact totals',
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string', format: 'uuid' } },
+          required: ['id'],
+        },
+        response: { 200: { type: 'object', additionalProperties: true } },
+      },
+    },
+    async (request, reply) => {
+      const parsedParams = idParamSchema.safeParse(request.params);
+      if (!parsedParams.success) {
+        return reply.code(400).send({ error: 'invalid_request' });
+      }
+
+      const ngo = await findNgoDetail({ id: parsedParams.data.id });
+      if (!ngo) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+
+      return ngo;
+    },
+  );
 }

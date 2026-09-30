@@ -30,6 +30,10 @@ npm run db:seed                 # optional: load sample NGOs, donors and streams
 npm run dev
 ```
 
+In development, browse the interactive API documentation at `http://localhost:3000/docs`.
+The generated OpenAPI JSON is available at `http://localhost:3000/docs/json`. The docs describe
+the public read endpoints; the Swagger UI is disabled in production.
+
 `npm run db:seed` uses upserts, so it is safe to run more than once.
 
 To run the whole stack containerized instead, after `npm run db:push` above: `docker compose up --build`.
@@ -69,6 +73,7 @@ ledger, not from the contract's history).
 until it's configured — set it to the Stellar public key (`G...`) that
 matches the `admin` configured on the deployed contracts. See
 [ENVIRONMENT.md](./ENVIRONMENT.md).
+
 ## Indexer
 
 See [docs/INDEXER.md](./docs/INDEXER.md) for a full table of which on-chain
@@ -183,7 +188,6 @@ Early development.
 
 Apache-2.0 — see [LICENSE](./LICENSE).
 
-
 ## Local development
 
 ```bash
@@ -193,3 +197,4 @@ npm install
 npm run db:migrate              # apply Prisma migrations to streamgive
 npm run db:seed                 # optional: load sample NGOs, donors and streams
 npm run dev
+```

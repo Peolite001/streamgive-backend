@@ -18,6 +18,22 @@ describe('GET /health', () => {
     await app.close();
   });
 
+  it('serves Swagger UI and an OpenAPI document in development', async () => {
+    const app = buildServer();
+
+    const ui = await app.inject({ method: 'GET', url: '/docs/' });
+    expect(ui.statusCode).toBe(200);
+    expect(ui.headers['content-type']).toContain('text/html');
+
+    const spec = await app.inject({ method: 'GET', url: '/docs/json' });
+    expect(spec.statusCode).toBe(200);
+    expect(spec.json().openapi).toMatch(/^3\\./);
+    expect(spec.json().paths['/streams']).toBeDefined();
+    expect(spec.json().paths['/ngos']).toBeDefined();
+
+    await app.close();
+  });
+
   it('responds with a non-200 status when the database is unreachable', async () => {
     vi.spyOn(prisma, '$queryRaw').mockRejectedValueOnce(new Error('Database connection failed'));
 
