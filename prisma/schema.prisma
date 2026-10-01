@@ -104,11 +104,3 @@ model IndexerCheckpoint {
 
   @@map("indexer_checkpoints")
 }
-
-
-model IndexerCheckpoint {
-  id          String   @id @default("singleton")
-  lastLedger  BigInt   @default(0)
-  lastEventId String?  // Tracks the precise event ID or paging token within the ledger
-  updatedAt   DateTime @updatedAt
-}
