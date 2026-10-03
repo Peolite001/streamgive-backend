@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
+import { sendPublicCacheable } from './cacheable.js';
 
 const paramsSchema = z.object({ ngoId: z.string().uuid() });
 
@@ -14,7 +15,7 @@ const paramsSchema = z.object({ ngoId: z.string().uuid() });
  * need to scan every stream on the platform to render.
  */
 export async function impactRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/impact', async () => {
+  app.get('/impact', async (request, reply) => {
     const [streams, verifiedNgoCount] = await Promise.all([
       prisma.stream.findMany({ select: { balance: true, withdrawn: true, status: true } }),
       prisma.ngo.count({ where: { verified: true } }),
@@ -33,12 +34,12 @@ export async function impactRoutes(app: FastifyInstance): Promise<void> {
     const totalWithdrawn = streams.reduce((sum, s) => sum + BigInt(s.withdrawn), 0n);
     const activeStreams = streams.filter((s) => s.status === 'ACTIVE').length;
 
-    return {
+    return sendPublicCacheable(request, reply, {
       totalCommitted: totalCommitted.toString(),
       totalWithdrawn: totalWithdrawn.toString(),
       activeStreams,
       verifiedNgoCount,
-    };
+    });
   });
 
   app.get('/impact/:ngoId', async (request, reply) => {
@@ -88,7 +89,7 @@ export async function impactRoutes(app: FastifyInstance): Promise<void> {
     const platformSharePercent =
       platformCommitted > 0n ? (Number(ngoCommitted) * 100) / Number(platformCommitted) : 0;
 
-    return {
+    return sendPublicCacheable(request, reply, {
       ngoId: ngo.id,
       name: ngo.name,
       totalCommitted: ngoCommitted.toString(),
@@ -97,6 +98,6 @@ export async function impactRoutes(app: FastifyInstance): Promise<void> {
       cancelledStreams: ngo.streams.filter((s) => s.status === 'CANCELLED').length,
       uniqueDonors: new Set(ngo.streams.map((s) => s.donorId)).size,
       platformSharePercent,
-    };
+    });
   });
 }

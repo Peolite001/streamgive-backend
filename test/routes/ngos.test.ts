@@ -30,6 +30,27 @@ describe('GET /ngos', () => {
     await app.close();
   });
 
+  it('returns an ETag and responds 304 when the client has the current representation', async () => {
+    const app = buildServer();
+
+    const firstResponse = await app.inject({ method: 'GET', url: '/ngos' });
+    const etag = firstResponse.headers.etag;
+    expect(etag).toBeDefined();
+    expect(firstResponse.headers['cache-control']).toContain('public');
+
+    const cachedResponse = await app.inject({
+      method: 'GET',
+      url: '/ngos',
+      headers: { 'if-none-match': String(etag) },
+    });
+
+    expect(cachedResponse.statusCode).toBe(304);
+    expect(cachedResponse.body).toBe('');
+    expect(cachedResponse.headers.etag).toBe(etag);
+
+    await app.close();
+  });
+
   it('paginates with cursor and returns no overlap between pages', async () => {
     const app = buildServer();
 

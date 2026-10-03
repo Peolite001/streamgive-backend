@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
+import { sendPublicCacheable } from './cacheable.js';
 
 const querySchema = z.object({
   // Stellar StrKey ed25519 public key: 'G' + 55 base32 (A-Z2-7) chars.
@@ -70,11 +71,11 @@ export async function streamRoutes(app: FastifyInstance): Promise<void> {
     const hasMore = rows.length > limit;
     const streams = hasMore ? rows.slice(0, limit) : rows;
 
-    return {
+    return sendPublicCacheable(request, reply, {
       streams: streams.map(serializeStream),
       hasMore,
       nextCursor: hasMore ? (streams.at(-1)?.id ?? null) : null,
-    };
+    });
   });
 
   app.get('/streams/:id', async (request, reply) => {
@@ -92,6 +93,6 @@ export async function streamRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({ error: 'not_found' });
     }
 
-    return serializeStream(stream);
+    return sendPublicCacheable(request, reply, serializeStream(stream));
   });
 }
