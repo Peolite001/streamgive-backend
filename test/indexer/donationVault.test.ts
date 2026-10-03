@@ -19,6 +19,7 @@ describe('handleDonationVaultEvent', () => {
     const token = fakeAddress('C');
 
     const closedAt = '2024-01-15T12:00:00.000Z';
+    const txHash = 'b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4';
     const event = makeEvent(
       [symbolScVal('created'), u64ScVal(1n)],
       xdr.ScVal.scvVec([
@@ -28,7 +29,7 @@ describe('handleDonationVaultEvent', () => {
         i128ScVal(1000n),
         i128ScVal(10n),
       ]),
-      { ledgerClosedAt: closedAt },
+      { ledgerClosedAt: closedAt, txHash },
     );
 
     await handleDonationVaultEvent(event);
@@ -39,6 +40,7 @@ describe('handleDonationVaultEvent', () => {
     expect(stream?.withdrawn).toBe('0');
     expect(stream?.status).toBe('ACTIVE');
     expect(stream?.createdAt.toISOString()).toBe(new Date(closedAt).toISOString());
+    expect(stream?.createdTxHash).toBe(txHash);
 
     expect(await prisma.donor.findUnique({ where: { address: donor } })).not.toBeNull();
 

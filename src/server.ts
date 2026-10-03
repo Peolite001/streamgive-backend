@@ -7,9 +7,11 @@ import { prisma } from './db.js';
 import { donorRoutes } from './routes/donors.js';
 import { impactRoutes } from './routes/impact.js';
 import { indexerStatusRoutes } from './routes/indexerStatus.js';
+import { getLatestLedgerSequence } from './stellar/rpc.js';
 import { ngoApplicationRoutes } from './routes/ngoApplications.js';
 import { ngoRoutes } from './routes/ngos.js';
 import { streamRoutes } from './routes/streams.js';
+import { getLatestLedgerSequence } from './stellar/rpc.js';
 
 // pino-pretty runs its formatting on a separate worker thread; spawning
 // one per Fastify instance is fine for a single long-running process, but
@@ -134,7 +136,7 @@ export function buildServer(options?: BuildServerOptions) {
 
   app.register(cors, {
     origin: allowedOrigins,
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['content-type', 'x-admin-address', 'x-admin-signature', 'x-admin-timestamp'],
   });
 
@@ -143,21 +145,55 @@ export function buildServer(options?: BuildServerOptions) {
     timeWindow: process.env.RATE_LIMIT_WINDOW ?? '1 minute',
   });
 
-  app.get('/health', async (_request, reply) => {
+  app.get('/health', async (_req, reply) => {
+    const [dbResult, rpcResult] = await Promise.allSettled([
+      prisma.$queryRaw`SELECT 1`,
+      getLatestLedgerSequence(),
+    ]);
+
+    const db = dbResult.status === 'fulfilled' ? 'ok' : 'error';
+    const rpc = rpcResult.status === 'fulfilled' ? 'ok' : 'error';
+
+    const status = db === 'ok' && rpc === 'ok' ? 'ok' : 'error';
+    return reply.code(status === 'ok' ? 200 : 503).send({ status, db, rpc });
+  });
+
+  app.get('/health/ready', async (request, reply) => {
     try {
+      // 1. Check DB
       await prisma.$queryRaw`SELECT 1`;
-      return { status: 'ok' };
-    } catch {
-      return reply.code(503).send({ status: 'error', database: 'unreachable' });
+
+      // 2. Get RPC and Indexer info
+      const [latestLedger, checkpointLedger] = await Promise.all([
+        getLatestLedgerSequence(),
+        getCheckpoint(),
+      ]);
+
+      if (checkpointLedger === undefined) {
+        return reply.code(503).send({ status: 'error', reason: 'indexer_not_started' });
+      }
+
+      const lag = latestLedger - checkpointLedger;
+      const threshold = parseInt(process.env.INDEXER_LAG_THRESHOLD ?? '100', 10);
+
+      if (lag > threshold) {
+        return reply.code(503).send({ status: 'error', reason: 'indexer_lagging', lag, threshold });
+      }
+
+      return { status: 'ok', lag, latestLedger, checkpointLedger };
+    } catch (error) {
+      request.log.error(error);
+      return reply.code(503).send({ status: 'error', reason: 'service_unavailable' });
     }
   });
 
-  app.register(ngoRoutes);
-  app.register(donorRoutes);
-  app.register(streamRoutes);
-  app.register(impactRoutes);
-  app.register(ngoApplicationRoutes);
-  app.register(indexerStatusRoutes);
+  const apiPrefix = { prefix: '/v1' };
+  app.register(ngoRoutes, apiPrefix);
+  app.register(donorRoutes, apiPrefix);
+  app.register(streamRoutes, apiPrefix);
+  app.register(impactRoutes, apiPrefix);
+  app.register(ngoApplicationRoutes, apiPrefix);
+  app.register(indexerStatusRoutes, apiPrefix);
 
   return app;
 }

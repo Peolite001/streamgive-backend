@@ -3,8 +3,10 @@ import { z } from 'zod';
 
 import { prisma } from '../db.js';
 import { sendPublicCacheable } from './cacheable.js';
+import { requireAdminSignature } from '../middleware/adminAuth.js';
 
 const idParamSchema = z.object({ id: z.string().uuid() });
+const RECENT_STREAMS_LIMIT = 10;
 
 const sortSchema = z.enum(['newest', 'oldest', 'name']).default('newest');
 
@@ -38,54 +40,92 @@ const lookupQuerySchema = z.object({
     .regex(/^G[A-Z2-7]{55}$/),
 });
 
+const adminListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(100),
+  cursor: z.string().uuid().optional(),
+  // Optional boolean filter as a query string (so 'true'/'false' arrive as
+  // strings); omitted means "everything, verified or not".
+  verified: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+});
+
 /** Builds the GET /ngos/:id response shape from a unique Prisma `where`. */
 async function findNgoDetail(where: { id: string } | { ownerAddress: string }) {
-  const ngo = await prisma.ngo.findUnique({
-    where,
-    include: {
-      streams: {
-        select: { donorId: true, status: true, balance: true, withdrawn: true },
-      },
-    },
-  });
+  const ngo = await prisma.ngo.findUnique({ where });
 
   if (!ngo) {
     return null;
   }
 
-  const approvedApp = await prisma.ngoApplication.findFirst({
-    where: { ownerAddress: ngo.ownerAddress, status: 'APPROVED' },
-    orderBy: { updatedAt: 'desc' },
-    select: { description: true, website: true, country: true },
-  });
+  const [approvedApp, streamStats, recentStreamRows] = await Promise.all([
+    prisma.ngoApplication.findFirst({
+      where: { ownerAddress: ngo.ownerAddress, status: 'APPROVED' },
+      orderBy: { updatedAt: 'desc' },
+      select: { description: true, website: true, country: true },
+    }),
+    prisma.$queryRaw<
+      Array<{
+        totalCommitted: string;
+        totalWithdrawn: string;
+        activeStreamCount: number;
+        donorCount: number;
+      }>
+    >`
+      SELECT
+        COALESCE(SUM(
+          CASE
+            WHEN "status" = 'CANCELLED' THEN "withdrawn"::numeric
+            ELSE "balance"::numeric + "withdrawn"::numeric
+          END
+        ), 0)::text AS "totalCommitted",
+        COALESCE(SUM("withdrawn"::numeric), 0)::text AS "totalWithdrawn",
+        COUNT(*) FILTER (WHERE "status" = 'ACTIVE')::int AS "activeStreamCount",
+        COUNT(DISTINCT "donor_id")::int AS "donorCount"
+      FROM "streams"
+      WHERE "ngo_id" = ${ngo.id}
+    `,
+    prisma.stream.findMany({
+      where: { ngoId: ngo.id },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: RECENT_STREAMS_LIMIT + 1,
+      select: {
+        id: true,
+        onChainId: true,
+        donor: { select: { address: true } },
+        tokenAddress: true,
+        rate: true,
+        balance: true,
+        withdrawn: true,
+        status: true,
+        createdAt: true,
+      },
+    }),
+  ]);
 
-  const { streams, ...profile } = ngo;
-
-  // For an active stream, balance + withdrawn equals the total deposited and
-  // committed to this NGO (balance will eventually be withdrawn; withdrawn
-  // already has been).  For a cancelled stream the contract zeroes balance
-  // and refunds it to the donor, so only the already-withdrawn portion was
-  // ever delivered to the NGO.  Counting balance on a cancelled stream would
-  // overstate totalCommitted by the refunded amount.
-  const totalCommitted = streams.reduce(
-    (sum, stream) => sum + committedAmount(stream),
-    0n,
-  );
-  const totalWithdrawn = streams.reduce((sum, s) => sum + BigInt(s.withdrawn), 0n);
+  const [stats] = streamStats;
+  const hasMoreRecentStreams = recentStreamRows.length > RECENT_STREAMS_LIMIT;
+  const recentStreams = recentStreamRows.slice(0, RECENT_STREAMS_LIMIT);
 
   return {
-    ...profile,
-    name: profile.name || null,
-    registered: profile.name !== '',
+    ...ngo,
+    name: ngo.name || null,
+    registered: ngo.name !== '',
     description: approvedApp?.description ?? null,
     website: approvedApp?.website ?? null,
     country: approvedApp?.country ?? null,
     stats: {
-      totalCommitted: totalCommitted.toString(),
-      totalWithdrawn: totalWithdrawn.toString(),
-      activeStreamCount: streams.filter((s) => s.status === 'ACTIVE').length,
-      donorCount: new Set(streams.map((s) => s.donorId)).size,
+      totalCommitted: stats.totalCommitted,
+      totalWithdrawn: stats.totalWithdrawn,
+      activeStreamCount: stats.activeStreamCount,
+      donorCount: stats.donorCount,
     },
+    recentStreams: recentStreams.map(({ onChainId, ...stream }) => ({
+      ...stream,
+      onChainId: onChainId.toString(),
+    })),
+    recentStreamsNextCursor: hasMoreRecentStreams ? recentStreams.at(-1)?.id ?? null : null,
   };
 }
 
@@ -121,6 +161,34 @@ export async function ngoRoutes(app: FastifyInstance): Promise<void> {
     const nextCursor = hasMore ? ngos[ngos.length - 1].id : null;
 
     return sendPublicCacheable(request, reply, { ngos, nextCursor });
+  });
+
+  // Admin counterpart to GET /ngos above: also returns the unverified rows
+  // the indexer creates (a `register` event, or a stream to an address that
+  // never registered) — exactly what an admin needs to spot streams pointed
+  // at NGOs that aren't in the public directory. Optionally narrowed with
+  // ?verified=true|false.
+  app.get('/ngos/all', { preHandler: requireAdminSignature }, async (request, reply) => {
+    const parsedQuery = adminListQuerySchema.safeParse(request.query);
+    if (!parsedQuery.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid_request', details: parsedQuery.error.flatten() });
+    }
+    const { limit, cursor, verified } = parsedQuery.data;
+
+    const rows = await prisma.ngo.findMany({
+      where: verified === undefined ? {} : { verified },
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+    });
+
+    const hasMore = rows.length > limit;
+    const ngos = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? ngos[ngos.length - 1].id : null;
+
+    return { ngos, nextCursor };
   });
 
   app.get('/ngos/lookup', async (request, reply) => {

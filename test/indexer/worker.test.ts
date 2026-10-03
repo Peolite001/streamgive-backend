@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 
 import { prisma } from '../../src/db.js';
 import { getCheckpoint, saveCheckpoint } from '../../src/indexer/checkpoint.js';
+import type { ContractEvent } from '../../src/indexer/worker.js';
 import { fakeAddress, resetDb } from '../helpers/db.js';
 import { addressScVal, i128ScVal, makeEvent, symbolScVal, u64ScVal } from '../helpers/events.js';
 
@@ -196,6 +197,53 @@ describe('pollOnce', () => {
     expect(await getCheckpoint()).toBe(301);
     expect(await prisma.indexerDeadLetter.count()).toBe(0);
     expect(await prisma.stream.findUnique({ where: { onChainId: 9n } })).not.toBeNull();
+  });
+
+  it('checkpoints the last event after handling a multi-event batch', async () => {
+    const { pollOnce } = await freshIndexer();
+    const handleEvent = vi.fn(async () => {});
+
+    await saveCheckpoint(400);
+    mocks.getLatestLedgerSequence.mockResolvedValue(420);
+    mocks.getEvents.mockResolvedValueOnce({
+      events: [
+        wellFormedCreatedEvent(401, 11n),
+        wellFormedCreatedEvent(402, 12n),
+        wellFormedCreatedEvent(403, 13n),
+      ],
+      latestLedger: 420,
+    });
+
+    await pollOnce(handleEvent);
+
+    expect(handleEvent).toHaveBeenCalledTimes(3);
+    expect(await getCheckpoint()).toBe(403);
+  });
+
+  it('keeps the checkpoint at the last successful event if failure recording fails', async () => {
+    const { pollOnce } = await freshIndexer();
+    const handleEvent = vi.fn(async (event: ContractEvent) => {
+      if (event.ledger === 502) throw new Error('handler failed');
+    });
+
+    await saveCheckpoint(500);
+    mocks.getLatestLedgerSequence.mockResolvedValue(520);
+    mocks.getEvents.mockResolvedValueOnce({
+      events: [
+        wellFormedCreatedEvent(501, 14n),
+        wellFormedCreatedEvent(502, 15n),
+        wellFormedCreatedEvent(503, 16n),
+      ],
+      latestLedger: 520,
+    });
+    vi.spyOn(prisma.indexerDeadLetter, 'upsert').mockRejectedValueOnce(
+      new Error('dead-letter store unavailable'),
+    );
+
+    await expect(pollOnce(handleEvent)).rejects.toThrow('dead-letter store unavailable');
+
+    expect(handleEvent).toHaveBeenCalledTimes(2);
+    expect(await getCheckpoint()).toBe(501);
   });
 });
 

@@ -45,6 +45,7 @@ export function makeEvent(
     type: 'contract',
     ledger,
     ledgerClosedAt: options?.ledgerClosedAt ?? new Date().toISOString(),
+    txHash: options?.txHash ?? 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     contractId: 'CTESTCONTRACTID',
     txHash: options?.txHash ?? 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
     topic,

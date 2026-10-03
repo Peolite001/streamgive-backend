@@ -14,6 +14,14 @@ const MAX_DELIVERED_EVENT_IDS = 10_000;
  * the receiver-side verification recipe.
  */
 const SIGNATURE_HEADER = 'x-streamgive-signature';
+const DEFAULT_WEBHOOK_TIMEOUT_MS = 3_000;
+
+function getWebhookTimeoutMs(): number {
+  const configured = Number(process.env.NOTIFY_WEBHOOK_TIMEOUT_MS);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? Math.min(configured, 2_147_483_647)
+    : DEFAULT_WEBHOOK_TIMEOUT_MS;
+}
 
 /** Real (if NOTIFY_WEBHOOK_URL is set): POSTs the event as JSON. Node's
  * built-in fetch means this needs no extra dependency. */
@@ -49,6 +57,7 @@ async function notifyWebhook(event: NotificationEvent): Promise<void> {
       method: 'POST',
       headers,
       body,
+      signal: AbortSignal.timeout(getWebhookTimeoutMs()),
     });
 
     if (res.ok) {
