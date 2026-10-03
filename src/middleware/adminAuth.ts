@@ -38,8 +38,32 @@ export function sep53Hash(message: string): Buffer {
 }
 
 /**
- * Verifies the caller controls ADMIN_ADDRESS's keypair, without a private
- * key ever crossing the wire: the client signs
+ * The Stellar public keys allowed to sign admin requests.
+ *
+ * `ADMIN_ADDRESSES` holds a comma-separated list, so a deployment can have
+ * more than one admin key at once — several operators, or an overlap while
+ * rotating a key. The older single-key `ADMIN_ADDRESS` still works and is
+ * unioned in, so an existing deployment can add a second admin without
+ * migrating its config. Blank entries (a trailing comma, a stray space in
+ * a pasted list) are dropped rather than kept as an address nothing can
+ * ever match.
+ *
+ * Read per-request, not cached at module load: env vars set after this
+ * module is first imported (as tests do) would otherwise never be seen,
+ * since a module-level const only evaluates once.
+ */
+function configuredAdminAddresses(): string[] {
+  const listed = (process.env.ADMIN_ADDRESSES ?? '').split(',');
+  const single = process.env.ADMIN_ADDRESS ? [process.env.ADMIN_ADDRESS] : [];
+  const cleaned = [...single, ...listed]
+    .map((address) => address.trim())
+    .filter((address) => address.length > 0);
+  return [...new Set(cleaned)];
+}
+
+/**
+ * Verifies the caller controls one of the configured admin keypairs,
+ * without a private key ever crossing the wire: the client signs
  * `${method}:${url}:${timestamp}` with their Stellar wallet (via its
  * generic message-signing call, not transaction-signing) and sends the
  * pieces as headers. The timestamp both binds the signature to this one
@@ -55,12 +79,9 @@ export async function requireAdminSignature(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  // Read per-request, not cached at module load: env vars set after this
-  // module is first imported (as tests do, in beforeAll) would otherwise
-  // never be seen, since a module-level const only evaluates once.
-  const ADMIN_ADDRESS = process.env.ADMIN_ADDRESS;
+  const allowedAdmins = configuredAdminAddresses();
 
-  if (!ADMIN_ADDRESS) {
+  if (allowedAdmins.length === 0) {
     reply.code(503).send({ error: 'admin_auth_not_configured' });
     return;
   }
@@ -78,7 +99,10 @@ export async function requireAdminSignature(
     return;
   }
 
-  if (address !== ADMIN_ADDRESS) {
+  // Checked before any signature work: a caller claiming an address that
+  // isn't on the allow-list is rejected no matter what they signed, so a
+  // forged/self-signed request never reaches the crypto below.
+  if (!allowedAdmins.includes(address)) {
     reply.code(401).send({ error: 'unauthorized' });
     return;
   }
@@ -111,8 +135,8 @@ export async function requireAdminSignature(
     // SEP-53 pins down what gets signed, but not how the wallet hands the
     // signature back, and wallets differ: some return base64, some hex.
     // Trying both costs nothing in trust — the signature still has to
-    // verify against ADMIN_ADDRESS either way — and avoids an opaque 401
-    // that looks identical to a genuinely forged one.
+    // verify against the claimed (allow-listed) address either way — and
+    // avoids an opaque 401 that looks identical to a genuinely forged one.
     const candidates: Array<[string, Buffer]> = [
       ['base64', Buffer.from(signatureB64, 'base64')],
       ['hex', Buffer.from(signatureB64, 'hex')],
