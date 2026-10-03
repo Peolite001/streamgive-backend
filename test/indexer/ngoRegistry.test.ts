@@ -63,4 +63,17 @@ describe('handleNgoRegistryEvent', () => {
     expect(streamEvent).not.toBeNull();
     expect(streamEvent?.payload).toMatchObject({ ownerAddress: owner });
   });
+
+  it('marks a verified NGO unverified on a revoked event following approval', async () => {
+    const owner = fakeAddress('D');
+    await prisma.ngo.create({ data: { ownerAddress: owner, name: 'UNICEF' } });
+
+    await handleNgoRegistryEvent(makeEvent([symbolScVal('approved'), addressScVal(owner)], stringScVal('')));
+    let ngo = await prisma.ngo.findUnique({ where: { ownerAddress: owner } });
+    expect(ngo?.verified).toBe(true);
+
+    await handleNgoRegistryEvent(makeEvent([symbolScVal('revoked'), addressScVal(owner)], stringScVal('')));
+    ngo = await prisma.ngo.findUnique({ where: { ownerAddress: owner } });
+    expect(ngo?.verified).toBe(false);
+  });
 });

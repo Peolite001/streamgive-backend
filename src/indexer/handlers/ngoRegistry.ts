@@ -5,8 +5,8 @@ import { notify } from '../../notifications/service.js';
 import type { ContractEvent } from '../worker.js';
 
 /**
- * Entry point for all ngo-registry contract events. Handles both
- * `register` and `approved` from the same function.
+ * Entry point for all ngo-registry contract events. Handles `register`,
+ * `approved`, and `revoked` from the same function.
  *
  * `register` — emitted when an NGO signs up. Writes: upserts the `ngo` row
  * for the owner address, creating it with `verified: false` or updating its
@@ -19,10 +19,13 @@ import type { ContractEvent } from '../worker.js';
  * e.g. the indexer started mid-history — doesn't throw). Persists a
  * `StreamEvent` row in the same transaction.
  *
- * Both ultimately upsert the same `ngos` row — `register` creates it
- * unverified, `approved` flips it to verified — so they're handled together
- * rather than split across two commits that would each leave the table in
- * an inconsistent shape on their own.
+ * `revoked` — emitted when an admin revokes a previously-approved NGO.
+ * Writes: sets `verified: false` on the matching `ngo` row via `updateMany`.
+ *
+ * All three ultimately mutate the same `ngos` row — `register` creates it
+ * unverified, `approved` flips it to verified, and `revoked` flips it back to
+ * unverified — so they're handled together rather than split across separate
+ * handlers.
  */
 export async function handleNgoRegistryEvent(event: ContractEvent): Promise<void> {
   const [topicSymbol, ownerVal] = event.topic;
@@ -71,7 +74,7 @@ export async function handleNgoRegistryEvent(event: ContractEvent): Promise<void
 
     const ngo = await prisma.ngo.findFirst({ where: { ownerAddress }, select: { id: true } });
     if (ngo) {
-      await notify({ type: 'ngo_approved', ownerAddress, ngoId: ngo.id });
+      await notify({ type: 'ngo_approved', ownerAddress, ngoId: ngo.id, eventId: event.id });
     }
     return;
   }
@@ -96,7 +99,7 @@ export async function handleNgoRegistryEvent(event: ContractEvent): Promise<void
 
     const ngo = await prisma.ngo.findFirst({ where: { ownerAddress }, select: { id: true } });
     if (ngo) {
-      await notify({ type: 'ngo_revoked', ownerAddress, ngoId: ngo.id });
+      await notify({ type: 'ngo_revoked', ownerAddress, ngoId: ngo.id, eventId: event.id });
     }
   }
 }

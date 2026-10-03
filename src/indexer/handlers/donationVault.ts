@@ -1,19 +1,22 @@
 import { scValToNative } from '@stellar/stellar-sdk';
 
 import { prisma } from '../../db.js';
+import { logger } from '../../logger.js';
 import { notify } from '../../notifications/service.js';
 import type { ContractEvent } from '../worker.js';
 
-async function ensureDonor(address: string) {
-  return prisma.donor.upsert({
+type DonationDb = Pick<typeof prisma, 'donor' | 'ngo' | 'stream'>;
+
+async function ensureDonor(db: DonationDb, address: string) {
+  return db.donor.upsert({
     where: { address },
     create: { address },
     update: {},
   });
 }
 
-async function ensureNgo(ownerAddress: string) {
-  return prisma.ngo.upsert({
+async function ensureNgo(db: DonationDb, ownerAddress: string) {
+  return db.ngo.upsert({
     where: { ownerAddress },
     // A stream can reference an NGO address that hasn't gone through
     // ngo-registry — donation-vault doesn't check registry membership
@@ -47,12 +50,12 @@ async function handleStreamCreated(event: ContractEvent): Promise<void> {
     bigint,
   ];
 
-  const [donor, ngo] = await Promise.all([
-    ensureDonor(donorVal.toString()),
-    ensureNgo(ngoVal.toString()),
-  ]);
+  const { ngo } = await prisma.$transaction(async (tx) => {
+    const [donor, ngo] = await Promise.all([
+      ensureDonor(tx, donorVal.toString()),
+      ensureNgo(tx, ngoVal.toString()),
+    ]);
 
-  await prisma.$transaction(async (tx) => {
     await tx.stream.upsert({
       where: { onChainId },
       create: {
@@ -84,10 +87,13 @@ async function handleStreamCreated(event: ContractEvent): Promise<void> {
         },
       },
     });
+
+    return { ngo };
   });
 
   await notify({
     type: 'stream_created',
+    eventId: event.id,
     streamId: onChainId.toString(),
     donorAddress: donorVal.toString(),
     ngoId: ngo.id,
@@ -114,12 +120,26 @@ async function handleWithdraw(event: ContractEvent): Promise<void> {
   const stream = await prisma.stream.findUnique({ where: { onChainId } });
   if (!stream) return;
 
+  const balance = BigInt(stream.balance);
+  const nextBalance = balance - accrued;
+  if (nextBalance < 0n) {
+    logger.warn(
+      {
+        onChainId: onChainId.toString(),
+        balance: balance.toString(),
+        accrued: accrued.toString(),
+      },
+      'withdraw exceeds recorded stream balance',
+    );
+  }
+
   await prisma.$transaction(async (tx) => {
     await tx.stream.update({
       where: { onChainId },
       data: {
-        balance: (BigInt(stream.balance) - accrued).toString(),
+        balance: (nextBalance < 0n ? 0n : nextBalance).toString(),
         withdrawn: (BigInt(stream.withdrawn) + accrued).toString(),
+        updatedAt: new Date(event.ledgerClosedAt),
       },
     });
 
@@ -136,6 +156,7 @@ async function handleWithdraw(event: ContractEvent): Promise<void> {
 
   await notify({
     type: 'stream_withdrawn',
+    eventId: event.id,
     streamId: onChainId.toString(),
     amount: accrued.toString(),
   });
@@ -169,8 +190,10 @@ async function handleCancel(event: ContractEvent): Promise<void> {
       data: {
         withdrawn: (BigInt(stream.withdrawn) + accrued).toString(),
         balance: '0',
+        lastRate: stream.rate,
         rate: '0',
         status: 'CANCELLED',
+        updatedAt: new Date(event.ledgerClosedAt),
       },
     });
 
@@ -190,6 +213,7 @@ async function handleCancel(event: ContractEvent): Promise<void> {
 
   await notify({
     type: 'stream_cancelled',
+    eventId: event.id,
     streamId: onChainId.toString(),
     settledToNgo: accrued.toString(),
     refundToDonor: refund.toString(),
