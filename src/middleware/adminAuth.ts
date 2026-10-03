@@ -116,7 +116,7 @@ export async function requireAdminSignature(
   // A seconds-based timestamp is always orders of magnitude smaller than a
   // milliseconds one, so detect it before the skew check and report the unit
   // mismatch explicitly rather than as a stale signature.
-  if (timestamp > 0 && timestamp < SECONDS_TIMESTAMP_MAXMAGNIP) {
+  if (timestamp > 0 && timestamp < SECONDS_TIMESTAMP_MAXMAGNI) {
     reply.code(401).send({ error: 'timestamp_unit_mismatch' });
     return;
   }
@@ -153,7 +153,7 @@ export async function requireAdminSignature(
     }
 
     const matched = candidates.find(
-      [, sig] => sig.length === ED25519_SIGNATURE_BYTES && keypair.verify(hash, sig),
+      ([, sig]) => sig.length === ED25519_SIGNATURE_BYTES && keypair.verify(hash, sig),
     );
 
     if (!matched) {
