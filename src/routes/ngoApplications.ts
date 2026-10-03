@@ -31,9 +31,7 @@ const idParamSchema = z.object({ id: z.string().uuid() });
 const statusQuerySchema = z.object({
   // Stellar StrKey ed25519 public key: 'G' + 55 base32 (A-Z2-7) chars.
   // Same regex as GET /ngos/lookup.
-  ownerAddress: z
-    .string()
-    .regex(/^G[A-Z2-7]{55}$/),
+  ownerAddress: z.string().regex(/^G[A-Z2-7]{55}$/),
 });
 
 const reviewBodySchema = z.object({
@@ -98,9 +96,7 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
     async (request, reply) => {
       const parsed = applicationSchema.safeParse(request.body);
       if (!parsed.success) {
-        return reply
-          .code(400)
-          .send({ error: 'invalid_request', details: parsed.error.flatten() });
+        return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten() });
       }
 
       const result = await createApplicationUnlessBlocked(parsed.data);
@@ -120,47 +116,67 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
   // outcome and timestamps — never the contact details or description
   // submitted with the application, since anyone who knows (or guesses) an
   // address could otherwise read them.
-  app.get('/ngo-applications/status', async (request, reply) => {
-    const parsed = statusQuerySchema.safeParse(request.query);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten() });
-    }
+  app.get(
+    '/ngo-applications/status',
+    {
+      schema: {
+        tags: ['NGOs'],
+        summary: 'Check an NGO application status',
+        description: 'Returns only the status and timestamps for the supplied owner address.',
+        querystring: {
+          type: 'object',
+          properties: { ownerAddress: { type: 'string', pattern: '^G[A-Z2-7]{55}$' } },
+          required: ['ownerAddress'],
+        },
+        response: {
+          200: { type: 'object', additionalProperties: true },
+          400: { type: 'object', additionalProperties: true },
+          404: { type: 'object', additionalProperties: true },
+          503: { type: 'object', additionalProperties: true },
+        },
+      },
+    },
+    async (request, reply) => {
+      const parsed = statusQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten() });
+      }
 
-    const application = await prisma.ngoApplication.findFirst({
-      where: { ownerAddress: parsed.data.ownerAddress },
-      orderBy: { createdAt: 'desc' },
-      select: { status: true, createdAt: true, updatedAt: true },
-    });
-    if (!application) {
-      return reply.code(404).send({ error: 'not_found' });
-    }
+      const application = await prisma.ngoApplication.findFirst({
+        where: { ownerAddress: parsed.data.ownerAddress },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true, createdAt: true, updatedAt: true },
+      });
+      if (!application) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
 
-    return application;
-  });
+      return application;
+    },
+  );
 
   // Admin dashboard endpoint: returns application counts grouped by
   // status so the client doesn't have to fetch and count applications
   // itself. Must be registered before the /:id route so 'stats' isn't
   // swallowed as an id and rejected by the UUID param validation.
-  app.get(
-    '/ngo-applications/stats',
-    { preHandler: requireAdminSignature },
-    async () => {
-      const grouped = await prisma.ngoApplication.groupBy({
-        by: ['status'],
-        _count: { _all: true },
-      });
+  app.get('/ngo-applications/stats', { preHandler: requireAdminSignature }, async () => {
+    const grouped = await prisma.ngoApplication.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+    });
 
-      const counts = { PENDING: 0, APPROVED: 0, REJECTED: 0 } as Record<string, number>;
-      for (const row of grouped) {
-        counts[row.status] = row._count._all;
-      }
+    const counts = { PENDING: 0, APPROVED: 0, REJECTED: 0 } as Record<string, number>;
+    for (const row of grouped) {
+      counts[row.status] = row._count._all;
+    }
 
-      const total = counts.PENDING + counts.APPROVED + counts.REJECTED;
+    const total = counts.PENDING + counts.APPROVED + counts.REJECTED;
 
-      return { counts: { PENDING: counts.PENDING, APPROVED: counts.APPROVED, REJECTED: counts.REJECTED }, total };
-    },
-  );
+    return {
+      counts: { PENDING: counts.PENDING, APPROVED: counts.APPROVED, REJECTED: counts.REJECTED },
+      total,
+    };
+  });
 
   app.get('/ngo-applications', { preHandler: requireAdminSignature }, async (request, reply) => {
     const parsed = listQuerySchema.safeParse(request.query);

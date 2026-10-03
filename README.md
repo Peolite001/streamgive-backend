@@ -49,7 +49,10 @@ npm install
 npm run db:push                 # sync the schema onto streamgive
 npm run db:seed                 # optional: load sample NGOs, donors and streams
 npm run dev
+
 ```
+
+In development, interactive API documentation is available at `http://localhost:3000/docs`; the OpenAPI document is at `/docs/json`. Swagger UI is disabled in production.
 
 ```
 bash
