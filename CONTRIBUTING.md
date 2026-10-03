@@ -69,3 +69,10 @@ npm test
 
 All three must pass with no errors. Then open a PR against `main` and link the
 relevant issue.
+
+Although the acceptance criteria specifically mention README and `DEPLOYMENT.md`, there is another contradiction in the repository.
+
+`CONTRIBUTING.md` currently tells developers:
+
+```bash
+npm run db:push

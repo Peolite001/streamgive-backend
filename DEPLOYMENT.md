@@ -82,3 +82,13 @@ whole allowance. That budget covers **one** free service, not several.
   keeps this service querying the database, which keeps the project active.
 - Percent-encode the password in the connection URL. A literal `#`
   truncates it, and a literal `@` breaks host parsing.
+
+
+This is particularly important because the current deployment documentation explicitly says:
+
+> The app does not migrate on boot. Push the schema from a machine that has `DATABASE_URL` set.
+
+and then:
+
+```bash
+npx prisma db push
