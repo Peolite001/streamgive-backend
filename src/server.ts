@@ -187,12 +187,13 @@ export function buildServer(options?: BuildServerOptions) {
     }
   });
 
-  app.register(ngoRoutes);
-  app.register(donorRoutes);
-  app.register(streamRoutes);
-  app.register(impactRoutes);
-  app.register(ngoApplicationRoutes);
-  app.register(indexerStatusRoutes);
+  const apiPrefix = { prefix: '/v1' };
+  app.register(ngoRoutes, apiPrefix);
+  app.register(donorRoutes, apiPrefix);
+  app.register(streamRoutes, apiPrefix);
+  app.register(impactRoutes, apiPrefix);
+  app.register(ngoApplicationRoutes, apiPrefix);
+  app.register(indexerStatusRoutes, apiPrefix);
 
   return app;
 }

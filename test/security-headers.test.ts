@@ -8,7 +8,7 @@ describe('Security headers (helmet)', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/health',
+      url: '/v1/health',
     });
 
     expect(response.headers['x-content-type-options']).toBe('nosniff');
@@ -21,7 +21,7 @@ describe('Security headers (helmet)', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/health',
+      url: '/v1/health',
     });
 
     expect(response.headers['x-frame-options']).toBe('SAMEORIGIN');
@@ -34,7 +34,7 @@ describe('Security headers (helmet)', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/health',
+      url: '/v1/health',
     });
 
     expect(response.headers['x-xss-protection']).toBeDefined();
@@ -47,7 +47,7 @@ describe('Security headers (helmet)', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/health',
+      url: '/v1/health',
     });
 
     // Helmet sets HSTS by default
@@ -61,7 +61,7 @@ describe('Security headers (helmet)', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/health',
+      url: '/v1/health',
     });
 
     expect(response.headers['x-dns-prefetch-control']).toBe('off');

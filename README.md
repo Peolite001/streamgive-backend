@@ -10,6 +10,12 @@ serves the data that powers the frontend.
 - Fastify (API server)
 - PostgreSQL
 
+## API
+
+Every HTTP API route is mounted under `/v1`, including health and admin routes.
+For example: `GET /v1/health`, `GET /v1/ngos`, `GET /v1/streams`, and
+`GET /v1/indexer/status`.
+
 ## NGO Verification Model
 
 An NGO's verified status consists of two distinct steps kept deliberately separate:

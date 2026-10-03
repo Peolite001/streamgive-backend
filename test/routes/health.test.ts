@@ -4,7 +4,7 @@ import { prisma } from '../../src/db.js';
 import { buildServer } from '../../src/server.js';
 import * as rpc from '../../src/stellar/rpc.js';
 
-describe('GET /health', () => {
+describe('GET /v1/health', () => {
   beforeEach(() => {
     vi.spyOn(prisma, '$queryRaw').mockResolvedValue([{}]);
   });
@@ -18,7 +18,7 @@ describe('GET /health', () => {
 
     const app = buildServer();
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/v1/health' });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ status: 'ok', db: 'ok', rpc: 'ok' });
 
@@ -36,7 +36,7 @@ describe('GET /health', () => {
 
     const app = buildServer();
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/v1/health' });
     expect(response.statusCode).toBe(503);
 <<<<<<< HEAD
     expect(response.json()).toEqual({ status: 'error', database: 'unreachable' });
@@ -65,7 +65,7 @@ describe('GET /health', () => {
     const app = buildServer();
 
     const responses = await Promise.all(
-      Array.from({ length: 3 }, () => app.inject({ method: 'GET', url: '/health' })),
+      Array.from({ length: 3 }, () => app.inject({ method: 'GET', url: '/v1/health' })),
     );
 
     expect(responses.map((response) => response.statusCode)).toEqual([200, 200, 200]);

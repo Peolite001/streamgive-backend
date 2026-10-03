@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildServer } from '../../src/server.js';
 
-describe('GET /indexer/status (#59)', () => {
+describe('GET /v1/indexer/status (#59)', () => {
   it('returns configured: false when no contract IDs are set', async () => {
     const originalEnv = process.env.CONTRACT_IDS;
     delete process.env.CONTRACT_IDS;
@@ -9,7 +9,7 @@ describe('GET /indexer/status (#59)', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/indexer/status',
+      url: '/v1/indexer/status',
     });
 
     expect(response.statusCode).toBe(200);
@@ -34,7 +34,7 @@ describe('GET /indexer/status (#59)', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/indexer/status',
+      url: '/v1/indexer/status',
     });
 
     expect(response.statusCode).toBe(200);
