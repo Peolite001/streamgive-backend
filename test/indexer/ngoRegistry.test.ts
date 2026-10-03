@@ -20,6 +20,13 @@ describe('handleNgoRegistryEvent', () => {
     const ngo = await prisma.ngo.findUnique({ where: { ownerAddress: owner } });
     expect(ngo?.name).toBe('Red Cross');
     expect(ngo?.verified).toBe(false);
+
+    // A StreamEvent row must be written atomically with the ngo upsert.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'register' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.streamId).toBeNull();
+    expect(streamEvent?.ledger).toBe(100);
+    expect(streamEvent?.payload).toMatchObject({ ownerAddress: owner, name: 'Red Cross' });
   });
 
   it('marks an existing NGO verified on an approved event', async () => {
@@ -30,6 +37,12 @@ describe('handleNgoRegistryEvent', () => {
 
     const ngo = await prisma.ngo.findUnique({ where: { ownerAddress: owner } });
     expect(ngo?.verified).toBe(true);
+
+    // A StreamEvent row must be written atomically with the ngo update.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'approved' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.streamId).toBeNull();
+    expect(streamEvent?.payload).toMatchObject({ ownerAddress: owner });
   });
 
   it('is a no-op for an approved event with no matching NGO', async () => {
@@ -43,6 +56,12 @@ describe('handleNgoRegistryEvent', () => {
 
     const ngo = await prisma.ngo.findUnique({ where: { ownerAddress: owner } });
     expect(ngo).toBeNull();
+
+    // A StreamEvent is still written even when no NGO row was found —
+    // the event happened on-chain regardless.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'approved' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.payload).toMatchObject({ ownerAddress: owner });
   });
 
   it('marks a verified NGO unverified on a revoked event following approval', async () => {

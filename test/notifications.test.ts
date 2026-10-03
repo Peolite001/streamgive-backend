@@ -21,7 +21,9 @@ describe('notification service', () => {
     const webhookUrl = 'https://example.com/webhook';
     process.env.NOTIFY_WEBHOOK_URL = webhookUrl;
 
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 200 }));
 
     const event: NotificationEvent = {
       type: 'ngo_approved',
@@ -53,5 +55,23 @@ describe('notification service', () => {
 
     await expect(notify(event)).resolves.not.toThrow();
     expect(consoleSpy).toHaveBeenCalled();
+  });
+
+  it('delivers an indexed event only once when the poll is retried', async () => {
+    process.env.NOTIFY_WEBHOOK_URL = 'https://example.com/webhook';
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    const event: NotificationEvent = {
+      type: 'ngo_approved',
+      ownerAddress: 'G1234567890',
+      ngoId: 'ngo-retried',
+      eventId: `event-${Date.now()}-duplicate-test`,
+    };
+
+    await notify(event);
+    await notify(event);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

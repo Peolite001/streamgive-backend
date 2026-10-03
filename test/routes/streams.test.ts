@@ -75,6 +75,36 @@ describe('GET /streams', () => {
     await app.close();
   });
 
+  it('coerces a string limit and rejects values above the maximum', async () => {
+    const app = buildServer();
+
+    const donor = await prisma.donor.create({ data: { address: fakeAddress('L') } });
+    const ngo = await prisma.ngo.create({
+      data: { ownerAddress: fakeAddress('M'), name: 'Limit NGO', verified: true },
+    });
+    await prisma.stream.createMany({
+      data: Array.from({ length: 3 }, (_, index) => ({
+        onChainId: BigInt(50 + index),
+        donorId: donor.id,
+        ngoId: ngo.id,
+        tokenAddress: fakeAddress('N'),
+        rate: '1',
+        balance: '100',
+        withdrawn: '0',
+      })),
+    });
+
+    const coerced = await app.inject({ method: 'GET', url: `/streams?ngo=${ngo.id}&limit=2` });
+    expect(coerced.statusCode).toBe(200);
+    expect(coerced.json().streams).toHaveLength(2);
+    expect(coerced.json().hasMore).toBe(true);
+
+    const tooLarge = await app.inject({ method: 'GET', url: `/streams?ngo=${ngo.id}&limit=101` });
+    expect(tooLarge.statusCode).toBe(400);
+
+    await app.close();
+  });
+
   it('pages through results with a filter applied', async () => {
     const app = buildServer();
 
@@ -122,16 +152,18 @@ describe('GET /streams', () => {
     expect(firstBody.streams).toHaveLength(2);
     expect(firstBody.hasMore).toBe(true);
     expect(firstBody.streams.map((s: { onChainId: string }) => s.onChainId)).toEqual(['3', '2']);
+    expect(firstBody.nextCursor).toBe(firstBody.streams[1].id);
 
     const secondPage = await app.inject({
       method: 'GET',
-      url: `/streams?ngo=${ngo.id}&limit=2&cursor=${firstBody.streams[1].id}`,
+      url: `/streams?ngo=${ngo.id}&limit=2&cursor=${firstBody.nextCursor}`,
     });
     expect(secondPage.statusCode).toBe(200);
     const secondBody = secondPage.json();
     expect(secondBody.streams).toHaveLength(1);
     expect(secondBody.streams[0].onChainId).toBe('1');
     expect(secondBody.hasMore).toBe(false);
+    expect(secondBody.nextCursor).toBeNull();
 
     await app.close();
   });
@@ -302,6 +334,38 @@ describe('GET /streams', () => {
 
     await app.close();
   });
+  it('exposes lastRate for a cancelled stream via GET /streams/:id', async () => {
+    const app = buildServer();
+
+    const donor = await prisma.donor.create({ data: { address: fakeAddress('M') } });
+    const ngo = await prisma.ngo.create({
+      data: { ownerAddress: fakeAddress('N'), name: 'NGO N', verified: true },
+    });
+    const stream = await prisma.stream.create({
+      data: {
+        onChainId: 99n,
+        donorId: donor.id,
+        ngoId: ngo.id,
+        tokenAddress: fakeAddress('O'),
+        rate: '0',
+        lastRate: '42',
+        balance: '0',
+        withdrawn: '0',
+        status: 'CANCELLED',
+      },
+    });
+
+    const response = await app.inject({ method: 'GET', url: `/streams/${stream.id}` });
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json();
+    expect(body.rate).toBe('0');
+    expect(body.lastRate).toBe('42');
+    expect(body.status).toBe('CANCELLED');
+
+    await app.close();
+  });
+
 });
 
 describe('GET /streams/:id', () => {

@@ -1,15 +1,21 @@
-import { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
+import { Prisma } from '../generated/prisma/client.js';
 import { requireAdminSignature } from '../middleware/adminAuth.js';
 
 const applicationSchema = z.object({
   ownerAddress: z.string().regex(/^G[A-Z2-7]{55}$/),
   name: z.string().min(1).max(200),
   description: z.string().min(1).max(5000),
-  website: z.string().url().optional(),
+  // Normalize scheme-less domains (e.g. "example.org") to "https://example.org"
+  // before URL validation so applicants who omit the scheme aren't blocked.
+  website: z
+    .string()
+    .transform((val) => (val && !/^https?:\/\//i.test(val) ? `https://${val}` : val))
+    .pipe(z.string().url())
+    .optional(),
   contactEmail: z.string().email(),
   country: z.string().max(100).optional(),
 });
@@ -32,11 +38,50 @@ const reviewBodySchema = z.object({
   reviewNote: z.string().max(2000).optional(),
 });
 
+/**
+ * Inserts a PENDING application, or reports the application that already
+ * blocks this address.
+ *
+ * Read-then-write is a race on its own: two POSTs that arrive together both
+ * read "nothing blocking", both insert, and one address ends up with two
+ * PENDING applications. The obvious remedy — a partial unique index on
+ * (owner_address) WHERE status = 'PENDING' — is not available here. This
+ * project syncs its schema with `prisma db push` and has no migration files
+ * (see DEPLOYMENT.md), so a raw index would never be applied, and Prisma's
+ * schema language cannot express a partial index anyway.
+ *
+ * So the insert is serialised in the database instead: a transaction-scoped
+ * advisory lock keyed on the owner address. The second request blocks until
+ * the first transaction commits, then re-reads inside its own transaction and
+ * sees the row the winner inserted, taking the 409 path. Postgres releases
+ * the lock at COMMIT or ROLLBACK, so a crashed request cannot wedge the
+ * address, and a `hashtext` collision only serialises two unrelated addresses
+ * — it can never let a duplicate through.
+ */
+async function createApplicationUnlessBlocked(data: z.infer<typeof applicationSchema>) {
+  return prisma.$transaction(async (tx) => {
+    // `::text` pins the bind parameter's type instead of leaving it to the
+    // server to infer.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${data.ownerAddress}::text)::bigint)`;
+
+    const existingApp = await tx.ngoApplication.findFirst({
+      where: {
+        ownerAddress: data.ownerAddress,
+        status: { in: ['PENDING', 'APPROVED'] },
+      },
+    });
+    if (existingApp) {
+      return { ok: false as const, status: existingApp.status };
+    }
+
+    return { ok: true as const, application: await tx.ngoApplication.create({ data }) };
+  });
+}
+
 export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/ngo-applications',
-    // Public write endpoint — tighter than the global default since it's
-    // the most spam-prone route in the API.
+    // Public write endpoint — tighter than the global default since it's // the most spam-prone route in the API.
     {
       config: {
         rateLimit: {
@@ -51,21 +96,15 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
         return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten() });
       }
 
-      const existingApp = await prisma.ngoApplication.findFirst({
-        where: {
-          ownerAddress: parsed.data.ownerAddress,
-          status: { in: ['PENDING', 'APPROVED'] },
-        },
-      });
-      if (existingApp) {
-        if (existingApp.status === 'APPROVED') {
+      const result = await createApplicationUnlessBlocked(parsed.data);
+      if (!result.ok) {
+        if (result.status === 'APPROVED') {
           return reply.code(409).send({ error: 'already_approved' });
         }
         return reply.code(409).send({ error: 'application_already_pending' });
       }
 
-      const application = await prisma.ngoApplication.create({ data: parsed.data });
-      return reply.code(201).send(application);
+      return reply.code(201).send(result.application);
     },
   );
 
@@ -86,7 +125,12 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
           properties: { ownerAddress: { type: 'string', pattern: '^G[A-Z2-7]{55}$' } },
           required: ['ownerAddress'],
         },
-        response: { 200: { type: 'object', additionalProperties: true } },
+        response: {
+          200: { type: 'object', additionalProperties: true },
+          400: { type: 'object', additionalProperties: true },
+          404: { type: 'object', additionalProperties: true },
+          503: { type: 'object', additionalProperties: true },
+        },
       },
     },
     async (request, reply) => {
@@ -107,6 +151,29 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
       return application;
     },
   );
+
+  // Admin dashboard endpoint: returns application counts grouped by
+  // status so the client doesn't have to fetch and count applications
+  // itself. Must be registered before the /:id route so 'stats' isn't
+  // swallowed as an id and rejected by the UUID param validation.
+  app.get('/ngo-applications/stats', { preHandler: requireAdminSignature }, async () => {
+    const grouped = await prisma.ngoApplication.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+    });
+
+    const counts = { PENDING: 0, APPROVED: 0, REJECTED: 0 } as Record<string, number>;
+    for (const row of grouped) {
+      counts[row.status] = row._count._all;
+    }
+
+    const total = counts.PENDING + counts.APPROVED + counts.REJECTED;
+
+    return {
+      counts: { PENDING: counts.PENDING, APPROVED: counts.APPROVED, REJECTED: counts.REJECTED },
+      total,
+    };
+  });
 
   app.get('/ngo-applications', { preHandler: requireAdminSignature }, async (request, reply) => {
     const parsed = listQuerySchema.safeParse(request.query);
@@ -164,6 +231,14 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
         return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten() });
       }
 
+      const application = await prisma.ngoApplication.findUnique({ where: { id } });
+      if (!application) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      if (application.status !== 'PENDING') {
+        return reply.code(409).send({ error: 'already_reviewed' });
+      }
+
       try {
         return await prisma.ngoApplication.update({
           where: { id },
@@ -175,14 +250,6 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
         }
         throw err;
       }
-      if (application.status !== 'PENDING') {
-        return reply.code(409).send({ error: 'already_reviewed' });
-      }
-
-      return await prisma.ngoApplication.update({
-        where: { id },
-        data: { status: 'APPROVED', reviewNote: parsed.data.reviewNote },
-      });
     },
   );
 
@@ -201,6 +268,14 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
         return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten() });
       }
 
+      const application = await prisma.ngoApplication.findUnique({ where: { id } });
+      if (!application) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      if (application.status !== 'PENDING') {
+        return reply.code(409).send({ error: 'already_reviewed' });
+      }
+
       try {
         return await prisma.ngoApplication.update({
           where: { id },
@@ -212,14 +287,6 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
         }
         throw err;
       }
-      if (application.status !== 'PENDING') {
-        return reply.code(409).send({ error: 'already_reviewed' });
-      }
-
-      return await prisma.ngoApplication.update({
-        where: { id },
-        data: { status: 'REJECTED', reviewNote: parsed.data.reviewNote },
-      });
     },
   );
 }

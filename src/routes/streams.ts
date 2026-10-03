@@ -59,7 +59,12 @@ export async function streamRoutes(app: FastifyInstance): Promise<void> {
             cursor: { type: 'string', format: 'uuid' },
           },
         },
-        response: { 200: { type: 'object', additionalProperties: true } },
+        response: {
+          200: { type: 'object', additionalProperties: true },
+          400: { type: 'object', additionalProperties: true },
+          404: { type: 'object', additionalProperties: true },
+          503: { type: 'object', additionalProperties: true },
+        },
       },
     },
     async (request, reply) => {
@@ -91,7 +96,11 @@ export async function streamRoutes(app: FastifyInstance): Promise<void> {
       const hasMore = rows.length > limit;
       const streams = hasMore ? rows.slice(0, limit) : rows;
 
-      return { streams: streams.map(serializeStream), hasMore };
+      return {
+        streams: streams.map(serializeStream),
+        hasMore,
+        nextCursor: hasMore ? (streams.at(-1)?.id ?? null) : null,
+      };
     },
   );
 
@@ -106,7 +115,12 @@ export async function streamRoutes(app: FastifyInstance): Promise<void> {
           properties: { id: { type: 'string', format: 'uuid' } },
           required: ['id'],
         },
-        response: { 200: { type: 'object', additionalProperties: true } },
+        response: {
+          200: { type: 'object', additionalProperties: true },
+          400: { type: 'object', additionalProperties: true },
+          404: { type: 'object', additionalProperties: true },
+          503: { type: 'object', additionalProperties: true },
+        },
       },
     },
     async (request, reply) => {

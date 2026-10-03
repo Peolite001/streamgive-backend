@@ -20,7 +20,12 @@ export async function impactRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Impact'],
         summary: 'Get platform-wide impact totals',
-        response: { 200: { type: 'object', additionalProperties: true } },
+        response: {
+          200: { type: 'object', additionalProperties: true },
+          400: { type: 'object', additionalProperties: true },
+          404: { type: 'object', additionalProperties: true },
+          503: { type: 'object', additionalProperties: true },
+        },
       },
     },
     async () => {
@@ -62,7 +67,12 @@ export async function impactRoutes(app: FastifyInstance): Promise<void> {
           properties: { ngoId: { type: 'string', format: 'uuid' } },
           required: ['ngoId'],
         },
-        response: { 200: { type: 'object', additionalProperties: true } },
+        response: {
+          200: { type: 'object', additionalProperties: true },
+          400: { type: 'object', additionalProperties: true },
+          404: { type: 'object', additionalProperties: true },
+          503: { type: 'object', additionalProperties: true },
+        },
       },
     },
     async (request, reply) => {

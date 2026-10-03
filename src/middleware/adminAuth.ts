@@ -17,10 +17,15 @@ const ED25519_SIGNATURE_BYTES = 64;
 // a real wallet's signature.
 const SEP53_PREFIX = 'Stellar Signed Message:\n';
 
+const usedSignatures = new Map<string, number>();
+
 /** Exported so tests can sign fixtures the same way a real wallet would,
  * rather than re-deriving (and risking drift from) this exact construction. */
 export function sep53Hash(message: string): Buffer {
-  const encoded = Buffer.concat([Buffer.from(SEP53_PREFIX, 'utf-8'), Buffer.from(message, 'utf-8')]);
+  const encoded = Buffer.concat([
+    Buffer.from(SEP53_PREFIX, 'utf-8'),
+    Buffer.from(message, 'utf-8'),
+  ]);
   return createHash('sha256').update(encoded).digest();
 }
 
@@ -87,6 +92,16 @@ export async function requireAdminSignature(
       ['hex', Buffer.from(signatureB64, 'hex')],
     ];
 
+    const replayKey = `${address}:${timestampHeader}`;
+    const now = Date.now();
+    for (const [key, seenAt] of usedSignatures) {
+      if (now - seenAt > MAX_CLOCK_SKEW_MS) usedSignatures.delete(key);
+    }
+    if (usedSignatures.has(replayKey)) {
+      reply.code(401).send({ error: 'replayed_signature' });
+      return;
+    }
+
     const matched = candidates.find(
       ([, sig]) => sig.length === ED25519_SIGNATURE_BYTES && keypair.verify(hash, sig),
     );
@@ -102,7 +117,9 @@ export async function requireAdminSignature(
         'admin signature did not verify',
       );
       reply.code(401).send({ error: 'unauthorized' });
+      return;
     }
+    usedSignatures.set(replayKey, now);
   } catch (err) {
     request.log.warn({ err }, 'admin signature check threw');
     reply.code(401).send({ error: 'unauthorized' });
