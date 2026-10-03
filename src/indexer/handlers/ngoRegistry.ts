@@ -5,22 +5,27 @@ import { notify } from '../../notifications/service.js';
 import type { ContractEvent } from '../worker.js';
 
 /**
- * Entry point for all ngo-registry contract events. Handles both
- * `register` and `approved` from the same function.
+ * Entry point for all ngo-registry contract events. Handles `register`,
+ * `approved`, and `revoked` from the same function.
  *
  * `register` — emitted when an NGO signs up. Writes: upserts the `ngo` row
  * for the owner address, creating it with `verified: false` or updating its
- * `name` if it already exists.
+ * `name` if it already exists. Persists a `StreamEvent` row in the same
+ * transaction.
  *
  * `approved` — emitted when an admin approves a previously-registered NGO.
  * Writes: sets `verified: true` on the matching `ngo` row via `updateMany`
  * (not `update`, so a stray `approved` seen without a prior `register` —
- * e.g. the indexer started mid-history — doesn't throw).
+ * e.g. the indexer started mid-history — doesn't throw). Persists a
+ * `StreamEvent` row in the same transaction.
  *
- * Both ultimately upsert the same `ngos` row — `register` creates it
- * unverified, `approved` flips it to verified — so they're handled together
- * rather than split across two commits that would each leave the table in
- * an inconsistent shape on their own.
+ * `revoked` — emitted when an admin revokes a previously-approved NGO.
+ * Writes: sets `verified: false` on the matching `ngo` row via `updateMany`.
+ *
+ * All three ultimately mutate the same `ngos` row — `register` creates it
+ * unverified, `approved` flips it to verified, and `revoked` flips it back to
+ * unverified — so they're handled together rather than split across separate
+ * handlers.
  */
 export async function handleNgoRegistryEvent(event: ContractEvent): Promise<void> {
   const [topicSymbol, ownerVal] = event.topic;
@@ -29,34 +34,72 @@ export async function handleNgoRegistryEvent(event: ContractEvent): Promise<void
 
   if (topic === 'register') {
     const name = scValToNative(event.value) as string;
-    await prisma.ngo.upsert({
-      where: { ownerAddress },
-      create: { ownerAddress, name, verified: false },
-      update: { name },
+    await prisma.$transaction(async (tx) => {
+      await tx.ngo.upsert({
+        where: { ownerAddress },
+        create: { ownerAddress, name, verified: false },
+        update: { name },
+      });
+
+      await tx.streamEvent.create({
+        data: {
+          type: 'register',
+          streamId: null,
+          ledger: event.ledger,
+          txHash: event.txHash,
+          payload: { ownerAddress, name },
+        },
+      });
     });
     return;
   }
 
   if (topic === 'approved') {
-    await prisma.ngo.updateMany({
-      where: { ownerAddress },
-      data: { verified: true },
+    await prisma.$transaction(async (tx) => {
+      await tx.ngo.updateMany({
+        where: { ownerAddress },
+        data: { verified: true },
+      });
+
+      await tx.streamEvent.create({
+        data: {
+          type: 'approved',
+          streamId: null,
+          ledger: event.ledger,
+          txHash: event.txHash,
+          payload: { ownerAddress },
+        },
+      });
     });
+
     const ngo = await prisma.ngo.findFirst({ where: { ownerAddress }, select: { id: true } });
     if (ngo) {
-      await notify({ type: 'ngo_approved', ownerAddress, ngoId: ngo.id });
+      await notify({ type: 'ngo_approved', ownerAddress, ngoId: ngo.id, eventId: event.id });
     }
     return;
   }
 
   if (topic === 'revoked') {
-    await prisma.ngo.updateMany({
-      where: { ownerAddress },
-      data: { verified: false },
+    await prisma.$transaction(async (tx) => {
+      await tx.ngo.updateMany({
+        where: { ownerAddress },
+        data: { verified: false },
+      });
+
+      await tx.streamEvent.create({
+        data: {
+          type: 'revoked',
+          streamId: null,
+          ledger: event.ledger,
+          txHash: event.txHash,
+          payload: { ownerAddress },
+        },
+      });
     });
+
     const ngo = await prisma.ngo.findFirst({ where: { ownerAddress }, select: { id: true } });
     if (ngo) {
-      await notify({ type: 'ngo_revoked', ownerAddress, ngoId: ngo.id });
+      await notify({ type: 'ngo_revoked', ownerAddress, ngoId: ngo.id, eventId: event.id });
     }
   }
 }
