@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
+import { sendPublicCacheable } from './cacheable.js';
 import { requireAdminSignature } from '../middleware/adminAuth.js';
 
 const idParamSchema = z.object({ id: z.string().uuid() });
@@ -159,7 +160,7 @@ export async function ngoRoutes(app: FastifyInstance): Promise<void> {
     const ngos = hasMore ? rows.slice(0, limit) : rows;
     const nextCursor = hasMore ? ngos[ngos.length - 1].id : null;
 
-    return { ngos, nextCursor };
+    return sendPublicCacheable(request, reply, { ngos, nextCursor });
   });
 
   // Admin counterpart to GET /ngos above: also returns the unverified rows
@@ -203,7 +204,7 @@ export async function ngoRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({ error: 'not_found' });
     }
 
-    return ngo;
+    return sendPublicCacheable(request, reply, ngo);
   });
 
   app.get('/ngos/:id/donors', async (request, reply) => {
@@ -261,6 +262,6 @@ export async function ngoRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({ error: 'not_found' });
     }
 
-    return ngo;
+    return sendPublicCacheable(request, reply, ngo);
   });
 }

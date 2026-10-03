@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
+import { sendPublicCacheable } from './cacheable.js';
 
 const paramsSchema = z.object({ ngoId: z.string().uuid() });
 
@@ -14,37 +15,32 @@ const paramsSchema = z.object({ ngoId: z.string().uuid() });
  * need to scan every stream on the platform to render.
  */
 export async function impactRoutes(app: FastifyInstance): Promise<void> {
-  app.get(
-    '/impact',
-    {
-      schema: {
-        tags: ['Impact'],
-        summary: 'Get platform-wide impact totals',
-        response: {
-          200: { type: 'object', additionalProperties: true },
-          400: { type: 'object', additionalProperties: true },
-          404: { type: 'object', additionalProperties: true },
-        },
-      },
-    },
-    async () => {
-      const [streams, verifiedNgoCount] = await Promise.all([
-        prisma.stream.findMany({ select: { balance: true, withdrawn: true, status: true } }),
-        prisma.ngo.count({ where: { verified: true } }),
-      ]);
+  app.get('/impact', async (request, reply) => {
+    const [streams, verifiedNgoCount] = await Promise.all([
+      prisma.stream.findMany({ select: { balance: true, withdrawn: true, status: true } }),
+      prisma.ngo.count({ where: { verified: true } }),
+    ]);
 
-      // For cancelled streams the balance was refunded to the donor and never
-      // delivered to any NGO, so only count withdrawn.  Active streams count
-      // balance + withdrawn (balance will be withdrawn in the future).
-      const totalCommitted = streams.reduce(
-        (sum, s) =>
-          s.status === 'CANCELLED'
-            ? sum + BigInt(s.withdrawn)
-            : sum + BigInt(s.balance) + BigInt(s.withdrawn),
-        0n,
-      );
-      const totalWithdrawn = streams.reduce((sum, s) => sum + BigInt(s.withdrawn), 0n);
-      const activeStreams = streams.filter((s) => s.status === 'ACTIVE').length;
+    // For cancelled streams the balance was refunded to the donor and never
+    // delivered to any NGO, so only count withdrawn.  Active streams count
+    // balance + withdrawn (balance will be withdrawn in the future).
+    const totalCommitted = streams.reduce(
+      (sum, s) =>
+        s.status === 'CANCELLED'
+          ? sum + BigInt(s.withdrawn)
+          : sum + BigInt(s.balance) + BigInt(s.withdrawn),
+      0n,
+    );
+    const totalWithdrawn = streams.reduce((sum, s) => sum + BigInt(s.withdrawn), 0n);
+    const activeStreams = streams.filter((s) => s.status === 'ACTIVE').length;
+
+    return sendPublicCacheable(request, reply, {
+      totalCommitted: totalCommitted.toString(),
+      totalWithdrawn: totalWithdrawn.toString(),
+      activeStreams,
+      verifiedNgoCount,
+    });
+  });
 
       return {
         totalCommitted: totalCommitted.toString(),
@@ -119,16 +115,15 @@ export async function impactRoutes(app: FastifyInstance): Promise<void> {
       const platformSharePercent =
         platformCommitted > 0n ? Number((ngoCommitted * 10000n) / platformCommitted) / 100 : 0;
 
-      return {
-        ngoId: ngo.id,
-        name: ngo.name,
-        totalCommitted: ngoCommitted.toString(),
-        totalWithdrawn: ngoWithdrawn.toString(),
-        activeStreams: ngo.streams.filter((s) => s.status === 'ACTIVE').length,
-        cancelledStreams: ngo.streams.filter((s) => s.status === 'CANCELLED').length,
-        uniqueDonors: new Set(ngo.streams.map((s) => s.donorId)).size,
-        platformSharePercent,
-      };
-    },
-  );
+    return sendPublicCacheable(request, reply, {
+      ngoId: ngo.id,
+      name: ngo.name,
+      totalCommitted: ngoCommitted.toString(),
+      totalWithdrawn: ngoWithdrawn.toString(),
+      activeStreams: ngo.streams.filter((s) => s.status === 'ACTIVE').length,
+      cancelledStreams: ngo.streams.filter((s) => s.status === 'CANCELLED').length,
+      uniqueDonors: new Set(ngo.streams.map((s) => s.donorId)).size,
+      platformSharePercent,
+    });
+  });
 }
