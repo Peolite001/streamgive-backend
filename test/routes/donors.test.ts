@@ -4,7 +4,7 @@ import { prisma } from '../../src/db.js';
 import { buildServer } from '../../src/server.js';
 import { fakeAddress, resetDb } from '../helpers/db.js';
 
-describe('GET /donors', () => {
+describe('GET /v1/donors', () => {
   afterEach(async () => {
     await resetDb();
   });
@@ -43,7 +43,7 @@ describe('GET /donors', () => {
       ],
     });
 
-    const response = await app.inject({ method: 'GET', url: '/donors' });
+    const response = await app.inject({ method: 'GET', url: '/v1/donors' });
 
     expect(response.statusCode).toBe(200);
     expect(response.json().donors).toEqual([
@@ -80,7 +80,7 @@ describe('GET /donors', () => {
 
     const firstPage = await app.inject({
       method: 'GET',
-      url: '/donors?sort=withdrawn&order=desc&limit=2',
+      url: '/v1/donors?sort=withdrawn&order=desc&limit=2',
     });
     expect(firstPage.statusCode).toBe(200);
     expect(firstPage.json().donors.map((donor: { id: string }) => donor.id)).toEqual([
@@ -91,7 +91,7 @@ describe('GET /donors', () => {
 
     const secondPage = await app.inject({
       method: 'GET',
-      url: `/donors?sort=withdrawn&order=desc&limit=2&cursor=${firstPage.json().nextCursor}`,
+      url: `/v1/donors?sort=withdrawn&order=desc&limit=2&cursor=${firstPage.json().nextCursor}`,
     });
     expect(secondPage.statusCode).toBe(200);
     expect(secondPage.json().donors.map((donor: { id: string }) => donor.id)).toEqual([
@@ -103,7 +103,7 @@ describe('GET /donors', () => {
   });
 });
 
-describe('GET /donors/:address', () => {
+describe('GET /v1/donors/:address', () => {
   afterEach(async () => {
     await resetDb();
   });
@@ -170,7 +170,7 @@ describe('GET /donors/:address', () => {
       ],
     });
 
-    const response = await app.inject({ method: 'GET', url: `/donors/${donor.address}` });
+    const response = await app.inject({ method: 'GET', url: `/v1/donors/${donor.address}` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual(
@@ -191,7 +191,7 @@ describe('GET /donors/:address', () => {
     const app = buildServer();
     const donor = await prisma.donor.create({ data: { address: fakeAddress('Z') } });
 
-    const response = await app.inject({ method: 'GET', url: `/donors/${donor.address}` });
+    const response = await app.inject({ method: 'GET', url: `/v1/donors/${donor.address}` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual(
@@ -208,7 +208,7 @@ describe('GET /donors/:address', () => {
 
   it('returns 404 for an unknown donor address', async () => {
     const app = buildServer();
-    const response = await app.inject({ method: 'GET', url: `/donors/${fakeAddress('Q')}` });
+    const response = await app.inject({ method: 'GET', url: `/v1/donors/${fakeAddress('Q')}` });
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: 'not_found' });
     await app.close();
@@ -216,7 +216,7 @@ describe('GET /donors/:address', () => {
 
   it('returns 400 for a malformed address', async () => {
     const app = buildServer();
-    const response = await app.inject({ method: 'GET', url: '/donors/not-an-address' });
+    const response = await app.inject({ method: 'GET', url: '/v1/donors/not-an-address' });
     expect(response.statusCode).toBe(400);
     await app.close();
   });

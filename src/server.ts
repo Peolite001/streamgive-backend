@@ -7,8 +7,10 @@ import Fastify from 'fastify';
 
 import { prisma } from './db.js';
 import { donorRoutes } from './routes/donors.js';
-import { indexerStatusRoutes } from './routes/indexerStatus.js';
 import { impactRoutes } from './routes/impact.js';
+import { indexerStatusRoutes } from './routes/indexerStatus.js';
+import { getLatestLedgerSequence } from './stellar/rpc.js';
+import { getCheckpoint } from './indexer/checkpoint.js';
 import { ngoApplicationRoutes } from './routes/ngoApplications.js';
 import { ngoRoutes } from './routes/ngos.js';
 import { streamRoutes } from './routes/streams.js';
@@ -20,7 +22,10 @@ import { streamRoutes } from './routes/streams.js';
 const USE_PRETTY_LOGS = !['production', 'test'].includes(process.env.NODE_ENV ?? '');
 
 export type TrustProxySetting =
-  boolean | string | string[] | ((address: string, hop: number) => boolean);
+  | boolean
+  | string
+  | string[]
+  | ((address: string, hop: number) => boolean);
 
 /**
  * Parses the TRUST_PROXY environment variable into a valid Fastify trustProxy configuration.
@@ -82,31 +87,14 @@ export function buildServer(options?: BuildServerOptions) {
       // devDependency on purpose, since the production image never needs it.
       transport: USE_PRETTY_LOGS ? { target: 'pino-pretty' } : undefined,
     },
+    // Behind a reverse proxy (e.g. Render's load balancer, Cloudflare), Fastify's
+    // underlying socket remoteAddress is the proxy's IP. Without trustProxy enabled,
+    // @fastify/rate-limit keys all requests to that shared proxy IP, throttling all
+    // users collectively if one client is busy. Enabling trustProxy (or a bounded hop
+    // count) ensures request.ip is read from X-Forwarded-For, properly isolating rate
+    // limiting per client IP.
     trustProxy: trustProxySetting,
   });
-
-  app.register(swagger, {
-    openapi: {
-      info: {
-        title: 'StreamGive API',
-        description: 'Public API for StreamGive streams, NGOs, and impact data.',
-        version: '1.0.0',
-      },
-      tags: [
-        { name: 'Health', description: 'Service health' },
-        { name: 'Streams', description: 'Public donation stream data' },
-        { name: 'NGOs', description: 'Public NGO directory and profiles' },
-        { name: 'Impact', description: 'Public platform and NGO impact metrics' },
-      ],
-    },
-  });
-
-  if (process.env.NODE_ENV !== 'production') {
-    app.register(swaggerUi, {
-      routePrefix: '/docs',
-      uiConfig: { docExpansion: 'list', deepLinking: true },
-    });
-  }
 
   app.setErrorHandler<Error & { statusCode?: number }>((error, request, reply) => {
     request.log.error(error);
@@ -150,7 +138,7 @@ export function buildServer(options?: BuildServerOptions) {
 
   app.register(cors, {
     origin: allowedOrigins,
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['content-type', 'x-admin-address', 'x-admin-signature', 'x-admin-timestamp'],
   });
 
@@ -159,38 +147,101 @@ export function buildServer(options?: BuildServerOptions) {
     timeWindow: process.env.RATE_LIMIT_WINDOW ?? '1 minute',
   });
 
-  app.get(
-    '/health',
-    {
-      schema: {
-        tags: ['Health'],
-        summary: 'Check API and database health',
-        response: {
-          200: {
-            type: 'object',
-            properties: { status: { type: 'string', const: 'ok' } },
-            required: ['status'],
-          },
-          503: { type: 'object', additionalProperties: true },
-        },
-      },
+  app.register(swagger, {
+    openapi: {
+      info: { title: 'StreamGive API', description: 'API for the StreamGive platform', version: '1.0.0' },
+      tags: [
+        { name: 'Health', description: 'Service health checks' },
+        { name: 'NGOs', description: 'NGO directory and profiles' },
+      ],
     },
-    async (_request, reply) => {
-      try {
-        await prisma.$queryRaw`SELECT 1`;
-        return { status: 'ok' };
-      } catch {
-        return reply.code(503).send({ status: 'error', database: 'unreachable' });
-      }
-    },
-  );
+  });
 
-  app.register(ngoRoutes);
-  app.register(donorRoutes);
-  app.register(streamRoutes);
-  app.register(impactRoutes);
-  app.register(ngoApplicationRoutes);
-  app.register(indexerStatusRoutes);
+  if (process.env.NODE_ENV !== 'production') {
+    app.register(swaggerUi, {
+      routePrefix: '/docs',
+      uiConfig: { docExpansion: 'list', deepLinking: false },
+    });
+  }
+
+  app.get('/health', async (_req, reply) => {
+    const [dbResult, rpcResult] = await Promise.allSettled([
+      prisma.$queryRaw`SELECT 1`,
+      getLatestLedgerSequence(),
+    ]);
+
+    const db = dbResult.status === 'fulfilled' ? 'ok' : 'error';
+    const rpc = rpcResult.status === 'fulfilled' ? 'ok' : 'error';
+
+    const status = db === 'ok' && rpc === 'ok' ? 'ok' : 'error';
+    return reply.code(status === 'ok' ? 200 : 503).send({ status, db, rpc });
+  });
+
+  app.get('/health/ready', async (request, reply) => {
+    try {
+      // 1. Check DB
+      await prisma.$queryRaw`SELECT 1`;
+
+      // 2. Get RPC and Indexer info
+      const [latestLedger, checkpointLedger] = await Promise.all([
+        getLatestLedgerSequence(),
+        getCheckpoint(),
+      ]);
+
+      if (checkpointLedger === undefined) {
+        return reply.code(503).send({ status: 'error', reason: 'indexer_not_started' });
+      }
+
+      const lag = latestLedger - checkpointLedger;
+      const threshold = parseInt(process.env.INDEXER_LAG_THRESHOLD ?? '100', 10);
+
+      if (lag > threshold) {
+        return reply.code(503).send({ status: 'error', reason: 'indexer_lagging', lag, threshold });
+      }
+
+      return { status: 'ok', lag, latestLedger, checkpointLedger };
+    } catch (error) {
+      request.log.error(error);
+      return reply.code(503).send({ status: 'error', reason: 'service_unavailable' });
+    }
+  });
+
+  app.addHook('onRoute', (route) => {
+    const schemas: Record<string, object> = {
+      '/ngos': {
+        tags: ['NGOs'], summary: 'List verified NGOs',
+        querystring: { type: 'object', properties: {
+          limit: { type: 'integer', minimum: 1, maximum: 100, default: 100 },
+          cursor: { type: 'string', format: 'uuid' },
+          sort: { type: 'string', enum: ['newest', 'oldest', 'name'], default: 'newest' },
+          q: { type: 'string', maxLength: 100 },
+        } },
+      },
+      '/ngos/lookup': {
+        tags: ['NGOs'], summary: 'Find an NGO by Stellar address',
+        querystring: { type: 'object', properties: { address: { type: 'string', pattern: '^G[A-Z2-7]{55}$' } }, required: ['address'] },
+      },
+      '/ngos/:id/donors': {
+        tags: ['NGOs'], summary: 'List donors for an NGO',
+        params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] },
+        querystring: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, cursor: { type: 'string', format: 'uuid' } } },
+      },
+      '/ngos/:id': {
+        tags: ['NGOs'], summary: 'Get an NGO profile and impact totals',
+        params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] },
+      },
+    };
+    const schema = schemas[route.url];
+    if (schema) route.schema = { ...route.schema, ...schema };
+  });
+
+  const apiPrefix = { prefix: '/v1' };
+  app.register(ngoRoutes, apiPrefix);
+  app.register(donorRoutes, apiPrefix);
+  app.register(streamRoutes, apiPrefix);
+  app.register(impactRoutes, apiPrefix);
+  app.register(ngoApplicationRoutes, apiPrefix);
+  app.register(indexerStatusRoutes, apiPrefix);
 
   return app;
 }

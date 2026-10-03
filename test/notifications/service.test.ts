@@ -17,11 +17,13 @@ const event: NotificationEvent = {
 describe('notify', () => {
   const originalEnv = process.env.NOTIFY_WEBHOOK_URL;
   const originalSecret = process.env.NOTIFY_WEBHOOK_SECRET;
+  const originalTimeout = process.env.NOTIFY_WEBHOOK_TIMEOUT_MS;
 
   beforeEach(async () => {
     vi.restoreAllMocks();
     await resetDb();
     delete process.env.NOTIFY_WEBHOOK_URL;
+    delete process.env.NOTIFY_WEBHOOK_TIMEOUT_MS;
     // Unset by default so the signing cases opt in explicitly and a stray
     // value in the developer's own .env can't make them pass for free.
     delete process.env.NOTIFY_WEBHOOK_SECRET;
@@ -41,6 +43,12 @@ describe('notify', () => {
       delete process.env.NOTIFY_WEBHOOK_SECRET;
     } else {
       process.env.NOTIFY_WEBHOOK_SECRET = originalSecret;
+    }
+
+    if (originalTimeout === undefined) {
+      delete process.env.NOTIFY_WEBHOOK_TIMEOUT_MS;
+    } else {
+      process.env.NOTIFY_WEBHOOK_TIMEOUT_MS = originalTimeout;
     }
   });
 
@@ -90,6 +98,31 @@ describe('notify', () => {
     });
     expect(log).not.toBeNull();
     expect(log?.eventType).toBe('stream_created');
+  });
+
+  it('aborts a webhook that does not respond within the configured timeout', async () => {
+    process.env.NOTIFY_WEBHOOK_URL = 'http://example.com/webhook';
+    process.env.NOTIFY_WEBHOOK_TIMEOUT_MS = '5';
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      const signal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        if (!signal) {
+          reject(new Error('expected webhook request to have an abort signal'));
+          return;
+        }
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+
+    await expect(notify(event)).resolves.toBeUndefined();
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://example.com/webhook',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    const [, request] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(request.signal?.aborted).toBe(true);
   });
 
   it('writes an email record on every notify call', async () => {

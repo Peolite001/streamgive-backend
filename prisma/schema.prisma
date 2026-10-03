@@ -57,9 +57,12 @@ model Stream {
   lastRate     String?
   balance      String
   withdrawn    String
-  status       StreamStatus @default(ACTIVE)
-  createdAt    DateTime     @default(now()) @map("created_at")
-  updatedAt    DateTime     @updatedAt @map("updated_at")
+  status         StreamStatus @default(ACTIVE)
+  /// Transaction hash of the on-chain transaction that created this stream.
+  /// Null for streams indexed before this field was added.
+  createdTxHash  String?      @map("created_tx_hash")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
 
   @@index([donorId])
   @@index([ngoId])

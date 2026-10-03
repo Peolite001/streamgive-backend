@@ -4,7 +4,7 @@ import { prisma } from '../../src/db.js';
 import { buildServer } from '../../src/server.js';
 import { fakeAddress, resetDb } from '../helpers/db.js';
 
-describe('GET /impact', () => {
+describe('GET /v1/impact', () => {
   beforeEach(async () => {
     await resetDb();
   });
@@ -16,7 +16,7 @@ describe('GET /impact', () => {
   it('returns zeroed totals when the platform has no data', async () => {
     const app = buildServer();
 
-    const response = await app.inject({ method: 'GET', url: '/impact' });
+    const response = await app.inject({ method: 'GET', url: '/v1/impact' });
     expect(response.statusCode).toBe(200);
 
     const body = response.json();
@@ -69,7 +69,7 @@ describe('GET /impact', () => {
       },
     });
 
-    const response = await app.inject({ method: 'GET', url: '/impact' });
+    const response = await app.inject({ method: 'GET', url: '/v1/impact' });
     expect(response.statusCode).toBe(200);
 
     const body = response.json();
@@ -120,7 +120,7 @@ describe('GET /impact', () => {
       },
     });
 
-    const response = await app.inject({ method: 'GET', url: '/impact' });
+    const response = await app.inject({ method: 'GET', url: '/v1/impact' });
     expect(response.statusCode).toBe(200);
 
     const body = response.json();
@@ -133,7 +133,7 @@ describe('GET /impact', () => {
   });
 });
 
-describe('GET /impact/:ngoId', () => {
+describe('GET /v1/impact/:ngoId', () => {
   afterEach(async () => {
     await resetDb();
   });
@@ -141,7 +141,7 @@ describe('GET /impact/:ngoId', () => {
   it('400s for a non-UUID id', async () => {
     const app = buildServer();
 
-    const response = await app.inject({ method: 'GET', url: '/impact/not-a-uuid' });
+    const response = await app.inject({ method: 'GET', url: '/v1/impact/not-a-uuid' });
     expect(response.statusCode).toBe(400);
 
     await app.close();
@@ -152,7 +152,7 @@ describe('GET /impact/:ngoId', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/impact/00000000-0000-0000-0000-000000000000',
+      url: '/v1/impact/00000000-0000-0000-0000-000000000000',
     });
     expect(response.statusCode).toBe(404);
 
@@ -166,7 +166,7 @@ describe('GET /impact/:ngoId', () => {
       data: { ownerAddress: fakeAddress('A'), name: 'Empty NGO', verified: true },
     });
 
-    const response = await app.inject({ method: 'GET', url: `/impact/${ngo.id}` });
+    const response = await app.inject({ method: 'GET', url: `/v1/impact/${ngo.id}` });
     expect(response.statusCode).toBe(200);
 
     const body = response.json();
@@ -236,7 +236,7 @@ describe('GET /impact/:ngoId', () => {
     // platform total committed = 1200 + 800 = 2000
     // ngo1 share = 1200 / 2000 = 60%
 
-    const response = await app.inject({ method: 'GET', url: `/impact/${ngo1.id}` });
+    const response = await app.inject({ method: 'GET', url: `/v1/impact/${ngo1.id}` });
     expect(response.statusCode).toBe(200);
 
     const body = response.json();
@@ -290,7 +290,7 @@ describe('GET /impact/:ngoId', () => {
       },
     });
 
-    const response = await app.inject({ method: 'GET', url: `/impact/${ngo1.id}` });
+    const response = await app.inject({ method: 'GET', url: `/v1/impact/${ngo1.id}` });
     expect(response.statusCode).toBe(200);
 
     const body = response.json();
@@ -333,7 +333,7 @@ describe('GET /impact/:ngoId', () => {
       },
     });
 
-    const response = await app.inject({ method: 'GET', url: `/impact/${ngo.id}` });
+    const response = await app.inject({ method: 'GET', url: `/v1/impact/${ngo.id}` });
     expect(response.statusCode).toBe(200);
 
     const body = response.json();
@@ -381,7 +381,7 @@ describe('GET /impact/:ngoId', () => {
       },
     });
 
-    const response = await app.inject({ method: 'GET', url: `/impact/${ngo.id}` });
+    const response = await app.inject({ method: 'GET', url: `/v1/impact/${ngo.id}` });
     expect(response.statusCode).toBe(200);
 
     const body = response.json();

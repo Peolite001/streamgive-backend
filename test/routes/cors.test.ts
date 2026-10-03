@@ -8,7 +8,7 @@ const OTHER_ORIGIN = 'https://evil.example';
 function preflight(app: ReturnType<typeof buildServer>, origin: string) {
   return app.inject({
     method: 'OPTIONS',
-    url: '/ngo-applications',
+    url: '/v1/ngo-applications',
     headers: {
       origin,
       'access-control-request-method': 'POST',

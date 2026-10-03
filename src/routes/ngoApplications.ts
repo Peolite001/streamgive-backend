@@ -62,7 +62,10 @@ async function createApplicationUnlessBlocked(data: z.infer<typeof applicationSc
   return prisma.$transaction(async (tx) => {
     // `::text` pins the bind parameter's type instead of leaving it to the
     // server to infer.
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${data.ownerAddress}::text)::bigint)`;
+    // $executeRaw, not $queryRaw: pg_advisory_xact_lock returns `void`, which
+    // the pg driver adapter cannot deserialize into a JS value. $executeRaw
+    // only needs the row count, so it sidesteps the unsupported column type.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${data.ownerAddress}::text)::bigint)`;
 
     const existingApp = await tx.ngoApplication.findFirst({
       where: {
@@ -241,11 +244,15 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
 
       try {
         return await prisma.ngoApplication.update({
-          where: { id },
-          data: { status: 'APPROVED', reviewNote: parsed.data.reviewNote },
+          where: { id, status: 'PENDING' },
+          data: { status: 'APPROVED', reviewNote: parsed.data?.reviewNote },
         });
       } catch (err) {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        if (
+          typeof err === 'object' &&
+          err !== null &&
+          (err as { code?: string }).code === 'P2025'
+        ) {
           return reply.code(404).send({ error: 'not_found' });
         }
         throw err;
@@ -278,11 +285,15 @@ export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> 
 
       try {
         return await prisma.ngoApplication.update({
-          where: { id },
-          data: { status: 'REJECTED', reviewNote: parsed.data.reviewNote },
+          where: { id, status: 'PENDING' },
+          data: { status: 'REJECTED', reviewNote: parsed.data?.reviewNote },
         });
       } catch (err) {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        if (
+          typeof err === 'object' &&
+          err !== null &&
+          (err as { code?: string }).code === 'P2025'
+        ) {
           return reply.code(404).send({ error: 'not_found' });
         }
         throw err;

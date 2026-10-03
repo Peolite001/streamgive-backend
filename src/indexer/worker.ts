@@ -202,9 +202,8 @@ export function startIndexer(handleEvent: EventHandler): () => Promise<void> {
   function scheduleNextPoll(): void {
     if (stopped) {
       return;
-    };
+    }
     const delay = backoffDelayMs(consecutiveFailures);
-
     timer = setTimeout(() => {
       runPoll();
     }, delay);
