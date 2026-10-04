@@ -1,7 +1,9 @@
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import Fastify, { type FastifyError } from 'fastify';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
+import Fastify from 'fastify';
 
 import { prisma } from './db.js';
 import { getCheckpoint } from './indexer/checkpoint.js';
@@ -9,6 +11,7 @@ import { donorRoutes } from './routes/donors.js';
 import { impactRoutes } from './routes/impact.js';
 import { indexerStatusRoutes } from './routes/indexerStatus.js';
 import { getLatestLedgerSequence } from './stellar/rpc.js';
+import { getCheckpoint } from './indexer/checkpoint.js';
 import { ngoApplicationRoutes } from './routes/ngoApplications.js';
 import { ngoRoutes } from './routes/ngos.js';
 import { streamRoutes } from './routes/streams.js';
@@ -155,18 +158,28 @@ export function buildServer(options?: BuildServerOptions) {
     },
   });
 
-  // Registered from inside a plugin rather than directly on the root
-  // instance. @fastify/rate-limit attaches the global limit through an
-  // `onRoute` hook that only exists once the plugin has booted, and a route
-  // declared directly on the root is added synchronously *before* that — so
-  // `/health` used to be added first and silently bypass the limiter
-  // entirely (no 429, and therefore no Retry-After).
-  app.register(async function healthRoutes(instance) {
-    instance.get('/health', async (_req, reply) => {
-      const [dbResult, rpcResult] = await Promise.allSettled([
-        prisma.$queryRaw`SELECT 1`,
-        getLatestLedgerSequence(),
-      ]);
+  app.register(swagger, {
+    openapi: {
+      info: { title: 'StreamGive API', description: 'API for the StreamGive platform', version: '1.0.0' },
+      tags: [
+        { name: 'Health', description: 'Service health checks' },
+        { name: 'NGOs', description: 'NGO directory and profiles' },
+      ],
+    },
+  });
+
+  if (process.env.NODE_ENV !== 'production') {
+    app.register(swaggerUi, {
+      routePrefix: '/docs',
+      uiConfig: { docExpansion: 'list', deepLinking: false },
+    });
+  }
+
+  app.get('/health', async (_req, reply) => {
+    const [dbResult, rpcResult] = await Promise.allSettled([
+      prisma.$queryRaw`SELECT 1`,
+      getLatestLedgerSequence(),
+    ]);
 
       const db = dbResult.status === 'fulfilled' ? 'ok' : 'error';
       const rpc = rpcResult.status === 'fulfilled' ? 'ok' : 'error';
@@ -203,6 +216,35 @@ export function buildServer(options?: BuildServerOptions) {
       request.log.error(error);
       return reply.code(503).send({ status: 'error', reason: 'service_unavailable' });
     }
+  });
+
+  app.addHook('onRoute', (route) => {
+    const schemas: Record<string, object> = {
+      '/ngos': {
+        tags: ['NGOs'], summary: 'List verified NGOs',
+        querystring: { type: 'object', properties: {
+          limit: { type: 'integer', minimum: 1, maximum: 100, default: 100 },
+          cursor: { type: 'string', format: 'uuid' },
+          sort: { type: 'string', enum: ['newest', 'oldest', 'name'], default: 'newest' },
+          q: { type: 'string', maxLength: 100 },
+        } },
+      },
+      '/ngos/lookup': {
+        tags: ['NGOs'], summary: 'Find an NGO by Stellar address',
+        querystring: { type: 'object', properties: { address: { type: 'string', pattern: '^G[A-Z2-7]{55}$' } }, required: ['address'] },
+      },
+      '/ngos/:id/donors': {
+        tags: ['NGOs'], summary: 'List donors for an NGO',
+        params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] },
+        querystring: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, cursor: { type: 'string', format: 'uuid' } } },
+      },
+      '/ngos/:id': {
+        tags: ['NGOs'], summary: 'Get an NGO profile and impact totals',
+        params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] },
+      },
+    };
+    const schema = schemas[route.url];
+    if (schema) route.schema = { ...route.schema, ...schema };
   });
 
   const apiPrefix = { prefix: '/v1' };

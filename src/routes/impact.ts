@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
+import { sendPublicCacheable } from './cacheable.js';
 
 const paramsSchema = z.object({ ngoId: z.string().uuid() });
 
@@ -14,7 +15,7 @@ const paramsSchema = z.object({ ngoId: z.string().uuid() });
  * need to scan every stream on the platform to render.
  */
 export async function impactRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/impact', async () => {
+  app.get('/impact', async (request, reply) => {
     const [streams, verifiedNgoCount] = await Promise.all([
       prisma.stream.findMany({ select: { balance: true, withdrawn: true, status: true } }),
       prisma.ngo.count({ where: { verified: true } }),
@@ -33,62 +34,88 @@ export async function impactRoutes(app: FastifyInstance): Promise<void> {
     const totalWithdrawn = streams.reduce((sum, s) => sum + BigInt(s.withdrawn), 0n);
     const activeStreams = streams.filter((s) => s.status === 'ACTIVE').length;
 
-    return {
+    return sendPublicCacheable(request, reply, {
       totalCommitted: totalCommitted.toString(),
       totalWithdrawn: totalWithdrawn.toString(),
       activeStreams,
       verifiedNgoCount,
-    };
+    });
   });
 
-  app.get('/impact/:ngoId', async (request, reply) => {
-    const parsedParams = paramsSchema.safeParse(request.params);
-    if (!parsedParams.success) {
-      return reply.code(400).send({ error: 'invalid_request' });
-    }
-    const { ngoId } = parsedParams.data;
+      return {
+        totalCommitted: totalCommitted.toString(),
+        totalWithdrawn: totalWithdrawn.toString(),
+        activeStreams,
+        verifiedNgoCount,
+      };
+    },
+  );
 
-    const ngo = await prisma.ngo.findUnique({
-      where: { id: ngoId },
-      include: {
-        streams: { select: { status: true, balance: true, withdrawn: true, donorId: true } },
+  app.get(
+    '/impact/:ngoId',
+    {
+      schema: {
+        tags: ['Impact'],
+        summary: 'Get impact totals for one NGO',
+        params: {
+          type: 'object',
+          properties: { ngoId: { type: 'string', format: 'uuid' } },
+          required: ['ngoId'],
+        },
+        response: {
+          200: { type: 'object', additionalProperties: true },
+          400: { type: 'object', additionalProperties: true },
+          404: { type: 'object', additionalProperties: true },
+        },
       },
-    });
+    },
+    async (request, reply) => {
+      const parsedParams = paramsSchema.safeParse(request.params);
+      if (!parsedParams.success) {
+        return reply.code(400).send({ error: 'invalid_request' });
+      }
+      const { ngoId } = parsedParams.data;
 
-    if (!ngo) {
-      return reply.code(404).send({ error: 'not_found' });
-    }
+      const ngo = await prisma.ngo.findUnique({
+        where: { id: ngoId },
+        include: {
+          streams: { select: { status: true, balance: true, withdrawn: true, donorId: true } },
+        },
+      });
 
-    // For cancelled streams the balance was refunded to the donor, so only
-    // count withdrawn.  Active streams count balance + withdrawn.
-    const ngoCommitted = ngo.streams.reduce(
-      (sum, s) =>
-        s.status === 'CANCELLED'
-          ? sum + BigInt(s.withdrawn)
-          : sum + BigInt(s.balance) + BigInt(s.withdrawn),
-      0n,
-    );
-    const ngoWithdrawn = ngo.streams.reduce((sum, s) => sum + BigInt(s.withdrawn), 0n);
+      if (!ngo) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
 
-    // Scans every stream on the platform — fine at MVP scale, but this is
-    // the first thing to replace with a maintained running total if the
-    // streams table grows large.
-    const allStreams = await prisma.stream.findMany({
-      select: { balance: true, withdrawn: true, status: true },
-    });
-    const platformCommitted = allStreams.reduce(
-      (sum, s) =>
-        s.status === 'CANCELLED'
-          ? sum + BigInt(s.withdrawn)
-          : sum + BigInt(s.balance) + BigInt(s.withdrawn),
-      0n,
-    );
+      // For cancelled streams the balance was refunded to the donor, so only
+      // count withdrawn.  Active streams count balance + withdrawn.
+      const ngoCommitted = ngo.streams.reduce(
+        (sum, s) =>
+          s.status === 'CANCELLED'
+            ? sum + BigInt(s.withdrawn)
+            : sum + BigInt(s.balance) + BigInt(s.withdrawn),
+        0n,
+      );
+      const ngoWithdrawn = ngo.streams.reduce((sum, s) => sum + BigInt(s.withdrawn), 0n);
 
-    // Guard against division by zero when platform has no committed streams (#89)
-    const platformSharePercent =
-      platformCommitted > 0n ? (Number(ngoCommitted) * 100) / Number(platformCommitted) : 0;
+      // Scans every stream on the platform — fine at MVP scale, but this is
+      // the first thing to replace with a maintained running total if the
+      // streams table grows large.
+      const allStreams = await prisma.stream.findMany({
+        select: { balance: true, withdrawn: true, status: true },
+      });
+      const platformCommitted = allStreams.reduce(
+        (sum, s) =>
+          s.status === 'CANCELLED'
+            ? sum + BigInt(s.withdrawn)
+            : sum + BigInt(s.balance) + BigInt(s.withdrawn),
+        0n,
+      );
 
-    return {
+      const platformSharePercent =
+        platformCommitted > 0n ? Number((ngoCommitted * 10000n) / platformCommitted) / 100 : 0;
+
+    return sendPublicCacheable(request, reply, {
       ngoId: ngo.id,
       name: ngo.name,
       totalCommitted: ngoCommitted.toString(),
@@ -97,6 +124,6 @@ export async function impactRoutes(app: FastifyInstance): Promise<void> {
       cancelledStreams: ngo.streams.filter((s) => s.status === 'CANCELLED').length,
       uniqueDonors: new Set(ngo.streams.map((s) => s.donorId)).size,
       platformSharePercent,
-    };
+    });
   });
 }
