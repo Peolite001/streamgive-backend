@@ -6,6 +6,7 @@ import swaggerUi from '@fastify/swagger-ui';
 import Fastify from 'fastify';
 
 import { prisma } from './db.js';
+import { getCheckpoint } from './indexer/checkpoint.js';
 import { donorRoutes } from './routes/donors.js';
 import { impactRoutes } from './routes/impact.js';
 import { indexerStatusRoutes } from './routes/indexerStatus.js';
@@ -96,7 +97,7 @@ export function buildServer(options?: BuildServerOptions) {
     trustProxy: trustProxySetting,
   });
 
-  app.setErrorHandler<Error & { statusCode?: number }>((error, request, reply) => {
+  app.setErrorHandler((error: FastifyError, request, reply) => {
     request.log.error(error);
     const candidateStatusCode =
       typeof error === 'object' && error !== null && 'statusCode' in error
@@ -145,6 +146,16 @@ export function buildServer(options?: BuildServerOptions) {
   app.register(rateLimit, {
     max: Number(process.env.RATE_LIMIT_MAX ?? 100),
     timeWindow: process.env.RATE_LIMIT_WINDOW ?? '1 minute',
+    // Spell the headers out instead of leaning on the plugin's defaults:
+    // `Retry-After` is the machine-readable contract clients back off on
+    // (RFC 9110 §10.2.3), and the `x-ratelimit-*` headers let a client see
+    // its remaining budget before it is throttled.
+    addHeaders: {
+      'x-ratelimit-limit': true,
+      'x-ratelimit-remaining': true,
+      'x-ratelimit-reset': true,
+      'retry-after': true,
+    },
   });
 
   app.register(swagger, {
@@ -170,11 +181,12 @@ export function buildServer(options?: BuildServerOptions) {
       getLatestLedgerSequence(),
     ]);
 
-    const db = dbResult.status === 'fulfilled' ? 'ok' : 'error';
-    const rpc = rpcResult.status === 'fulfilled' ? 'ok' : 'error';
+      const db = dbResult.status === 'fulfilled' ? 'ok' : 'error';
+      const rpc = rpcResult.status === 'fulfilled' ? 'ok' : 'error';
 
-    const status = db === 'ok' && rpc === 'ok' ? 'ok' : 'error';
-    return reply.code(status === 'ok' ? 200 : 503).send({ status, db, rpc });
+      const status = db === 'ok' && rpc === 'ok' ? 'ok' : 'error';
+      return reply.code(status === 'ok' ? 200 : 503).send({ status, db, rpc });
+    });
   });
 
   app.get('/health/ready', async (request, reply) => {

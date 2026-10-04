@@ -85,8 +85,12 @@ describe('GET /health/ready', () => {
   });
 
   it('responds with 200 and status ok when DB and RPC are reachable and lag is within threshold', async () => {
-    const rpcSpy = vi.spyOn(await import('../../src/stellar/rpc.js'), 'getLatestLedgerSequence').mockResolvedValue(10050);
-    const checkpointSpy = vi.spyOn(await import('../../src/indexer/checkpoint.js'), 'getCheckpoint').mockResolvedValue(10000);
+    vi.spyOn(await import('../../src/stellar/rpc.js'), 'getLatestLedgerSequence').mockResolvedValue(
+      10050,
+    );
+    vi.spyOn(await import('../../src/indexer/checkpoint.js'), 'getCheckpoint').mockResolvedValue(
+      10000,
+    );
 
     const app = buildServer();
     const response = await app.inject({ method: 'GET', url: '/health/ready' });

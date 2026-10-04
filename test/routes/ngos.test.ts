@@ -190,7 +190,6 @@ describe('GET /v1/ngos', () => {
   });
 });
 
-describe('GET /v1/ngos/lookup', () => {
 describe('GET /ngos/all (admin)', () => {
   beforeAll(() => {
     process.env.ADMIN_ADDRESS = adminKeypair.publicKey();

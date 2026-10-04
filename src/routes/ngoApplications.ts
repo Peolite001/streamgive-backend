@@ -2,7 +2,6 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
-import { Prisma } from '../generated/prisma/client.js';
 import { requireAdminSignature } from '../middleware/adminAuth.js';
 
 const applicationSchema = z.object({
@@ -84,7 +83,8 @@ async function createApplicationUnlessBlocked(data: z.infer<typeof applicationSc
 export async function ngoApplicationRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/ngo-applications',
-    // Public write endpoint — tighter than the global default since it's // the most spam-prone route in the API.
+    // Public write endpoint — tighter than the global default since it's
+    // the most spam-prone route in the API.
     {
       config: {
         rateLimit: {

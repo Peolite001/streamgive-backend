@@ -15,7 +15,10 @@ describe('startIndexer', () => {
     vi.mocked(checkpoint.getCheckpoint).mockResolvedValue(100);
     vi.mocked(checkpoint.saveCheckpoint).mockResolvedValue();
     vi.mocked(rpc.getLatestLedgerSequence).mockResolvedValue(100);
-    vi.mocked(rpc.rpcServer.getEvents).mockResolvedValue({ events: [], latestLedger: 100 } as any);
+    vi.mocked(rpc.rpcServer.getEvents).mockResolvedValue({
+      events: [],
+      latestLedger: 100,
+    } as unknown as Awaited<ReturnType<typeof rpc.rpcServer.getEvents>>);
   });
 
   afterEach(() => {

@@ -195,7 +195,7 @@ describe('GET /v1/ngo-applications/status', () => {
     const body = response.json();
     expect(body.status).toBe('APPROVED');
     expect(body.createdAt).toBe(latest.createdAt.toISOString());
-    expect(body.updatedAt).toBe&latest.updatedAt.toISOString());
+    expect(body.updatedAt).toBe(latest.updatedAt.toISOString());
     // No contact details or other application fields leak out.
     expect(Object.keys(body).sort()).toEqual(['createdAt', 'status', 'updatedAt']);
 
