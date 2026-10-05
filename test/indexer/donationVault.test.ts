@@ -1,13 +1,15 @@
 import { xdr } from '@stellar/stellar-sdk';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { prisma } from '../../src/db.js';
 import { handleDonationVaultEvent } from '../../src/indexer/handlers/donationVault.js';
+import { logger } from '../../src/logger.js';
 import { fakeAddress, resetDb } from '../helpers/db.js';
 import { addressScVal, i128ScVal, makeEvent, symbolScVal, u64ScVal } from '../helpers/events.js';
 
 describe('handleDonationVaultEvent', () => {
   afterEach(async () => {
+    vi.restoreAllMocks();
     await resetDb();
   });
 
@@ -17,6 +19,7 @@ describe('handleDonationVaultEvent', () => {
     const token = fakeAddress('C');
 
     const closedAt = '2024-01-15T12:00:00.000Z';
+    const txHash = 'b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4';
     const event = makeEvent(
       [symbolScVal('created'), u64ScVal(1n)],
       xdr.ScVal.scvVec([
@@ -26,7 +29,7 @@ describe('handleDonationVaultEvent', () => {
         i128ScVal(1000n),
         i128ScVal(10n),
       ]),
-      { ledgerClosedAt: closedAt },
+      { ledgerClosedAt: closedAt, txHash },
     );
 
     await handleDonationVaultEvent(event);
@@ -37,12 +40,26 @@ describe('handleDonationVaultEvent', () => {
     expect(stream?.withdrawn).toBe('0');
     expect(stream?.status).toBe('ACTIVE');
     expect(stream?.createdAt.toISOString()).toBe(new Date(closedAt).toISOString());
+    expect(stream?.createdTxHash).toBe(txHash);
 
     expect(await prisma.donor.findUnique({ where: { address: donor } })).not.toBeNull();
 
     // Never went through ngo-registry — placeholder, unverified.
     const ngoRow = await prisma.ngo.findUnique({ where: { ownerAddress: ngo } });
     expect(ngoRow?.verified).toBe(false);
+
+    // A StreamEvent row must be written atomically with the stream upsert.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'created' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.streamId).toBe(1n);
+    expect(streamEvent?.ledger).toBe(100);
+    expect(streamEvent?.txHash).toBe(
+      'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    );
+    expect(streamEvent?.payload).toMatchObject({
+      deposit: '1000',
+      rate: '10',
+    });
   });
 
   it('applies a withdraw event as a balance/withdrawn delta', async () => {
@@ -67,6 +84,71 @@ describe('handleDonationVaultEvent', () => {
     const stream = await prisma.stream.findUnique({ where: { onChainId: 2n } });
     expect(stream?.balance).toBe('500');
     expect(stream?.withdrawn).toBe('500');
+
+    // A StreamEvent row must be written atomically with the stream update.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'withdraw' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.streamId).toBe(2n);
+    expect(streamEvent?.ledger).toBe(100);
+    expect(streamEvent?.payload).toMatchObject({ accrued: '500' });
+  });
+
+  it('sets updatedAt from the on-chain ledger close time on a withdraw event', async () => {
+    const donorRow = await prisma.donor.create({ data: { address: fakeAddress('D2') } });
+    const ngoRow = await prisma.ngo.create({
+      data: { ownerAddress: fakeAddress('E2'), name: 'NGO E2' },
+    });
+    await prisma.stream.create({
+      data: {
+        onChainId: 20n,
+        donorId: donorRow.id,
+        ngoId: ngoRow.id,
+        tokenAddress: fakeAddress('F2'),
+        rate: '10',
+        balance: '1000',
+        withdrawn: '0',
+      },
+    });
+
+    const onChainTime = '2024-03-10T08:00:00.000Z';
+    const event = makeEvent(
+      [symbolScVal('withdraw'), u64ScVal(20n)],
+      i128ScVal(200n),
+      { ledgerClosedAt: onChainTime },
+    );
+    await handleDonationVaultEvent(event);
+
+    const stream = await prisma.stream.findUnique({ where: { onChainId: 20n } });
+    expect(stream?.updatedAt.toISOString()).toBe(new Date(onChainTime).toISOString());
+  });
+
+  it('clamps the balance to zero when accrued exceeds the recorded balance', async () => {
+    const warn = vi.spyOn(logger, 'warn');
+    const donorRow = await prisma.donor.create({ data: { address: fakeAddress('M') } });
+    const ngoRow = await prisma.ngo.create({
+      data: { ownerAddress: fakeAddress('N'), name: 'NGO N' },
+    });
+    await prisma.stream.create({
+      data: {
+        onChainId: 5n,
+        donorId: donorRow.id,
+        ngoId: ngoRow.id,
+        tokenAddress: fakeAddress('O'),
+        rate: '10',
+        balance: '400',
+        withdrawn: '100',
+      },
+    });
+
+    await handleDonationVaultEvent(makeEvent([symbolScVal('withdraw'), u64ScVal(5n)], i128ScVal(500n)));
+
+    const stream = await prisma.stream.findUnique({ where: { onChainId: 5n } });
+    expect(stream?.balance).toBe('0');
+    expect(stream?.withdrawn).toBe('600');
+    expect(warn).toHaveBeenCalledWith(
+      { onChainId: '5', balance: '400', accrued: '500' },
+      'withdraw exceeds recorded stream balance',
+    );
   });
 
   it('applies a cancel event: settles accrued, zeroes balance/rate, marks cancelled', async () => {
@@ -95,8 +177,45 @@ describe('handleDonationVaultEvent', () => {
     const stream = await prisma.stream.findUnique({ where: { onChainId: 3n } });
     expect(stream?.balance).toBe('0');
     expect(stream?.rate).toBe('0');
+    expect(stream?.lastRate).toBe('10'); // original rate preserved from before cancel
     expect(stream?.withdrawn).toBe('500'); // 200 already withdrawn + 300 settled on cancel
     expect(stream?.status).toBe('CANCELLED');
+
+    // A StreamEvent row must be written atomically with the stream update.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'cancel' } });
+    expect(streamEvent).not.toBeNull();
+    expect(streamEvent?.streamId).toBe(3n);
+    expect(streamEvent?.ledger).toBe(100);
+    expect(streamEvent?.payload).toMatchObject({ accrued: '300', refund: '700' });
+  });
+
+  it('sets updatedAt from the on-chain ledger close time on a cancel event', async () => {
+    const donorRow = await prisma.donor.create({ data: { address: fakeAddress('G2') } });
+    const ngoRow = await prisma.ngo.create({
+      data: { ownerAddress: fakeAddress('H2'), name: 'NGO H2' },
+    });
+    await prisma.stream.create({
+      data: {
+        onChainId: 30n,
+        donorId: donorRow.id,
+        ngoId: ngoRow.id,
+        tokenAddress: fakeAddress('I2'),
+        rate: '10',
+        balance: '1000',
+        withdrawn: '200',
+      },
+    });
+
+    const onChainTime = '2024-06-20T15:30:00.000Z';
+    const event = makeEvent(
+      [symbolScVal('cancel'), u64ScVal(30n)],
+      xdr.ScVal.scvVec([i128ScVal(300n), i128ScVal(700n)]),
+      { ledgerClosedAt: onChainTime },
+    );
+    await handleDonationVaultEvent(event);
+
+    const stream = await prisma.stream.findUnique({ where: { onChainId: 30n } });
+    expect(stream?.updatedAt.toISOString()).toBe(new Date(onChainTime).toISOString());
   });
 
   it('ignores topup/ratemod events rather than corrupting balance (documented gap)', async () => {
@@ -120,6 +239,10 @@ describe('handleDonationVaultEvent', () => {
 
     const stream = await prisma.stream.findUnique({ where: { onChainId: 4n } });
     expect(stream?.balance).toBe('1000'); // unchanged — see the handler's comment
+
+    // topup is intentionally unhandled — no StreamEvent row should be written.
+    const streamEvent = await prisma.streamEvent.findFirst({ where: { type: 'topup' } });
+    expect(streamEvent).toBeNull();
   });
 
   it('no-ops when a withdraw event is received for an unknown stream', async () => {

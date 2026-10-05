@@ -4,6 +4,14 @@ import { createHash } from 'node:crypto';
 
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
+/** Timestamps are Unix epoch milliseconds (`Date.now()`). A value whose
+ * magnitude is characteristic of epoch seconds (e.g. 1700000000) would otherwise
+ * be silently treated as a timestamp from 1970 and rejected as stale, so we
+ * detect and report that case explicitly. This threshold is well below any
+ * plausible millisecond timestamp (after 2001) and well above any plausible
+ * seconds timestamp (before year 33658). */
+const SECONDS_TIMESTAMP_MAXMAGNI = 100000000000;
+
 /** ed25519 signatures are always 64 bytes. A decode that yields any other
  * length means the encoding guess was wrong, not that the key was. */
 const ED25519_SIGNATURE_BYTES = 64;
@@ -17,32 +25,63 @@ const ED25519_SIGNATURE_BYTES = 64;
 // a real wallet's signature.
 const SEP53_PREFIX = 'Stellar Signed Message:\n';
 
+const usedSignatures = new Map<string, number>();
+
 /** Exported so tests can sign fixtures the same way a real wallet would,
  * rather than re-deriving (and risking drift from) this exact construction. */
 export function sep53Hash(message: string): Buffer {
-  const encoded = Buffer.concat([Buffer.from(SEP53_PREFIX, 'utf-8'), Buffer.from(message, 'utf-8')]);
+  const encoded = Buffer.concat([
+    Buffer.from(SEP53_PREFIX, 'utf-8'),
+    Buffer.from(message, 'utf-8'),
+  ]);
   return createHash('sha256').update(encoded).digest();
 }
 
 /**
- * Verifies the caller controls ADMIN_ADDRESS's keypair, without a private
- * key ever crossing the wire: the client signs
+ * The Stellar public keys allowed to sign admin requests.
+ *
+ * `ADMIN_ADDRESSES` holds a comma-separated list, so a deployment can have
+ * more than one admin key at once — several operators, or an overlap while
+ * rotating a key. The older single-key `ADMIN_ADDRESS` still works and is
+ * unioned in, so an existing deployment can add a second admin without
+ * migrating its config. Blank entries (a trailing comma, a stray space in
+ * a pasted list) are dropped rather than kept as an address nothing can
+ * ever match.
+ *
+ * Read per-request, not cached at module load: env vars set after this
+ * module is first imported (as tests do) would otherwise never be seen,
+ * since a module-level const only evaluates once.
+ */
+function configuredAdminAddresses(): string[] {
+  const listed = (process.env.ADMIN_ADDRESSES ?? '').split(',');
+  const single = process.env.ADMIN_ADDRESS ? [process.env.ADMIN_ADDRESS] : [];
+  const cleaned = [...single, ...listed]
+    .map((address) => address.trim())
+    .filter((address) => address.length > 0);
+  return [...new Set(cleaned)];
+}
+
+/**
+ * Verifies the caller controls one of the configured admin keypairs,
+ * without a private key ever crossing the wire: the client signs
  * `${method}:${url}:${timestamp}` with their Stellar wallet (via its
  * generic message-signing call, not transaction-signing) and sends the
  * pieces as headers. The timestamp both binds the signature to this one
  * request and bounds replay — a captured header set is only useful for a
  * few minutes.
+ *
+ * The `X-Admin-Timestamp` value must be a Unix epoch timestamp in
+ * *milliseconds* (`Date.now()`), not seconds. Seconds-based values are
+ * rejected with `timestamp_unit_mismatch` so the client gets a clear signal
+ * instead of a misleading `stale_signature`.
  */
 export async function requireAdminSignature(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  // Read per-request, not cached at module load: env vars set after this
-  // module is first imported (as tests do, in beforeAll) would otherwise
-  // never be seen, since a module-level const only evaluates once.
-  const ADMIN_ADDRESS = process.env.ADMIN_ADDRESS;
+  const allowedAdmins = configuredAdminAddresses();
 
-  if (!ADMIN_ADDRESS) {
+  if (allowedAdmins.length === 0) {
     reply.code(503).send({ error: 'admin_auth_not_configured' });
     return;
   }
@@ -60,13 +99,29 @@ export async function requireAdminSignature(
     return;
   }
 
-  if (address !== ADMIN_ADDRESS) {
+  // Checked before any signature work: a caller claiming an address that
+  // isn't on the allow-list is rejected no matter what they signed, so a
+  // forged/self-signed request never reaches the crypto below.
+  if (!allowedAdmins.includes(address)) {
     reply.code(401).send({ error: 'unauthorized' });
     return;
   }
 
   const timestamp = Number(timestampHeader);
-  if (!Number.isFinite(timestamp) || Math.abs(Date.now() - timestamp) > MAX_CLOCK_SKEW_MS) {
+  if (!Number.isFinite(timestamp)) {
+    reply.code(401).send({ error: 'stale_signature' });
+    return;
+  }
+
+  // A seconds-based timestamp is always orders of magnitude smaller than a
+  // milliseconds one, so detect it before the skew check and report the unit
+  // mismatch explicitly rather than as a stale signature.
+  if (timestamp > 0 && timestamp < SECONDS_TIMESTAMP_MAXMAGNI) {
+    reply.code(401).send({ error: 'timestamp_unit_mismatch' });
+    return;
+  }
+
+  if (Math.abs(Date.now() - timestamp) > MAX_CLOCK_SKEW_MS) {
     reply.code(401).send({ error: 'stale_signature' });
     return;
   }
@@ -80,12 +135,22 @@ export async function requireAdminSignature(
     // SEP-53 pins down what gets signed, but not how the wallet hands the
     // signature back, and wallets differ: some return base64, some hex.
     // Trying both costs nothing in trust — the signature still has to
-    // verify against ADMIN_ADDRESS either way — and avoids an opaque 401
-    // that looks identical to a genuinely forged one.
+    // verify against the claimed (allow-listed) address either way — and
+    // avoids an opaque 401 that looks identical to a genuinely forged one.
     const candidates: Array<[string, Buffer]> = [
       ['base64', Buffer.from(signatureB64, 'base64')],
       ['hex', Buffer.from(signatureB64, 'hex')],
     ];
+
+    const replayKey = `${address}:${timestampHeader}`;
+    const now = Date.now();
+    for (const [key, seenAt] of usedSignatures) {
+      if (now - seenAt > MAX_CLOCK_SKEW_MS) usedSignatures.delete(key);
+    }
+    if (usedSignatures.has(replayKey)) {
+      reply.code(401).send({ error: 'replayed_signature' });
+      return;
+    }
 
     const matched = candidates.find(
       ([, sig]) => sig.length === ED25519_SIGNATURE_BYTES && keypair.verify(hash, sig),
@@ -102,7 +167,9 @@ export async function requireAdminSignature(
         'admin signature did not verify',
       );
       reply.code(401).send({ error: 'unauthorized' });
+      return;
     }
+    usedSignatures.set(replayKey, now);
   } catch (err) {
     request.log.warn({ err }, 'admin signature check threw');
     reply.code(401).send({ error: 'unauthorized' });
