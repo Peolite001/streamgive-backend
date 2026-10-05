@@ -1,52 +1,41 @@
-// src/__tests__/worker.test.ts
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-describe('Atomic Event Processing & Checkpointing (#40)', () => {
-  it('prevents double-counting when replaying the same withdraw event twice', async () => {
-    // Setup mock prisma transaction client and initial balance
-    const initialBalance = 1000;
-    let balance = initialBalance;
-    const withdrawAmount = 200;
+import * as checkpoint from './checkpoint.js';
+import * as contracts from './contracts.js';
+import * as rpc from '../stellar/rpc.js';
+import { startIndexer } from './worker.js';
 
-    const mockTx = {
-      userBalance: {
-        update: jest.fn().mockImplementation(({ decrement }) => {
-          balance -= decrement.balance;
-        }),
-      },
-      checkpoint: {
-        upsert: jest.fn().mockResolvedValue({ lastBlock: 10 }),
-      },
-      processedEvent: {
-        findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn().mockResolvedValue({}),
-      },
-    };
+vi.mock('./checkpoint.js');
+vi.mock('../stellar/rpc.js');
 
-    const mockPrisma = {
-      $transaction: jest.fn().mockImplementation(async (callback) => callback(mockTx)),
-    };
+describe('startIndexer', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(contracts, 'WATCHED_CONTRACT_IDS', 'get').mockReturnValue(['C_TEST']);
+    vi.mocked(checkpoint.getCheckpoint).mockResolvedValue(100);
+    vi.mocked(checkpoint.saveCheckpoint).mockResolvedValue();
+    vi.mocked(rpc.getLatestLedgerSequence).mockResolvedValue(100);
+    vi.mocked(rpc.rpcServer.getEvents).mockResolvedValue({
+      events: [],
+      latestLedger: 100,
+    } as unknown as Awaited<ReturnType<typeof rpc.rpcServer.getEvents>>);
+  });
 
-    // Simulate event processing function
-    const processEvent = async (event: any) => {
-      await mockPrisma.$transaction(async (tx) => {
-        // Apply withdraw
-        await tx.userBalance.update({ decrement: { balance: event.amount } });
-        // Update checkpoint
-        await tx.checkpoint.upsert({});
-      });
-    };
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
-    const event = { id: 'evt_123', amount: withdrawAmount };
+  it('stops polling after the stop function is called', async () => {
+    const handler = vi.fn();
+    const stop = startIndexer(handler);
 
-    // Process event first time
-    await processEvent(event);
-    expect(balance).toBe(800);
+    await vi.runAllTimersAsync();
+    const stop$ = stop();
+    await stop$;
 
-    // Simulate replay of the same event (if checkpoint hasn't advanced or with idempotency table)
-    // For transactional consistency, replaying without checkpoint advance:
-    // If idempotent check is implemented, second execution skips.
-    
-    // Assert balance correctly reflects single application
-    expect(balance).toBe(800);
+    const callsBefore = vi.mocked(rpc.getLatestLedgerSequence).mock.calls.length;
+    await vi.runAllTimersAsync();
+    expect(vi.mocked(rpc.getLatestLedgerSequence).mock.calls.length).toBe(callsBefore);
   });
 });

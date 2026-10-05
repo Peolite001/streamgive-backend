@@ -18,7 +18,7 @@ datasource db {
 model Donor {
   id        String   @id @default(uuid())
   address   String   @unique
-  createdAt DateTime @@default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at")
   streams   Stream[]
 
   @@map("donors")
@@ -29,8 +29,8 @@ model Ngo {
   ownerAddress String   @unique @map("owner_address")
   name         String
   verified     Boolean  @default(false)
-  createdAt    DateTime @@default(now()) @map("created_at")
-  updatedAt    DateTime @@updatedAt @map("updated_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
   streams      Stream[]
 
   @@map("ngos")
@@ -41,56 +41,32 @@ enum StreamStatus {
   CANCELLED
 }
 
-enum StreamEventType {
-  CREATED
-  TOPUP
-  RATE_CHANGED
-  WITHDRAWAL
-  CANCELLED
-}
-
 model Stream {
   id           String       @id @default(uuid())
   /// Stream id as assigned by the donation-vault contract.
   onChainId    BigInt       @unique @map("on_chain_id")
   donorId      String       @map("donor_id")
   donor        Donor        @relation(fields: [donorId], references: [id])
-  ngoId         String       @map("ngo_id")
-  ngo           Ngo          @relation(fields: [ngoId], references: [id])
+  ngoId        String       @map("ngo_id")
+  ngo          Ngo          @relation(fields: [ngoId], references: [id])
   tokenAddress String       @map("token_address")
   /// i128 values from the contract, stored as decimal strings to avoid
   /// precision loss — Postgres bigint/numeric mapping is handled at the
   /// application layer, not by Prisma's native int types.
-  rate          String
-  balance       String
-  withdrawn     String
-  status        StreamStatus @@default(ACTIVE)
-  createdAt     DateTime     @default(now()) @map("created_at")
-  updatedAt     DateTime     @@updatedAt @map("updated_at")
-  events        StreamEvent[]
+  rate         String
+  lastRate     String?
+  balance      String
+  withdrawn    String
+  status         StreamStatus @default(ACTIVE)
+  /// Transaction hash of the on-chain transaction that created this stream.
+  /// Null for streams indexed before this field was added.
+  createdTxHash  String?      @map("created_tx_hash")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
 
   @@index([donorId])
   @@index([ngoId])
   @@map("streams")
-}
-
-/// Append-only timeline of events for a stream, written by the indexer
-/// as it observes donation-vault events. Exposed via GET /streams/:id/activity.
-model StreamEvent {
-  id        String          @id @default(uuid())
-  streamId  String          @map("stream_id")
-  stream    Stream          @relation(fields: [streamId], references: [id], onDelete: Cascade)
-  type      StreamEventType
-  /// Optional decimal string payload (amount for top-ups/withdrawals,
-  /// new rate for rate changes), kept as a string for the same bigint
-  /// precision reasons as the stream columns.
-  amount    String?
-  /// Ledger the event was observed at, used to order the timeline.
-  ledger    Int?
-  createdAt  DateTime        @default(now()) @map("created_at")
-
-  @@index([streamId, createdAt])
-  @@map("stream_events")
 }
 
 enum NgoApplicationStatus {
@@ -110,26 +86,82 @@ model NgoApplication {
   ownerAddress String               @map("owner_address")
   name         String
   description  String
-  website       String?
+  website      String?
   contactEmail String               @map("contact_email")
-  country       String?
-  status        NgoApplicationStatus @@default(PENDING)
-  reviewNote    String?              @map("review_note")
-  createdAt     DateTime             @default(now()) @map("created_at")
-  updatedAt     DateTime             @@updatedAt @map("updated_at")
+  country      String?
+  status       NgoApplicationStatus @default(PENDING)
+  reviewNote   String?              @map("review_note")
+  createdAt    DateTime             @default(now()) @map("created_at")
+  updatedAt    DateTime             @updatedAt @map("updated_at")
 
   @@index([ownerAddress])
   @@index([status])
   @@map("ngo_applications")
 }
 
+model NotificationLog {
+  id        String   @id @default(uuid())
+  eventType String   @map("event_type")
+  channel   String
+  success   Boolean
+  error     String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("notification_logs")
+}
+
 /// Single-row-per-id table tracking how far the event indexer has gotten,
 /// so a restart resumes instead of re-scanning from "now" every time.
 model IndexerCheckpoint {
-  id          String   @id @default("singleton")
-  lastLedger  BigInt   @default(0)
-  lastEventId String?  // Tracks the precise event ID or paging token within the ledger
-  updatedAt    DateTime @@updatedAt
+  id         String   @id
+  lastLedger Int      @map("last_ledger")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
   @@map("indexer_checkpoints")
+}
+
+/// Events the indexer could not decode or handle. Recording one is what
+/// lets the checkpoint advance past it: before this table existed a single
+/// event whose shape didn't match the handler's expectations threw on every
+/// poll, pinning the checkpoint and blocking every later event behind it
+/// forever. Nothing reads these rows automatically — they exist so a failure
+/// is inspectable and replayable by hand instead of silently dropped.
+model IndexerDeadLetter {
+  id         String   @id @default(uuid())
+  /// Event id as assigned by the RPC ("<ledger>-<index>"), unique per event.
+  eventId    String   @unique @map("event_id")
+  ledger     Int
+  contractId String?  @map("contract_id")
+  /// The handler's failure message, for diagnosing the shape mismatch.
+  error      String
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([ledger])
+  @@map("indexer_dead_letters")
+}
+
+/// Immutable audit log of every on-chain contract event the indexer has
+/// processed. One row per event, written in the same transaction as the
+/// state update it triggered. Enables activity feeds, balance-drift
+/// debugging, and idempotent reprocessing.
+model StreamEvent {
+  id        String   @id @default(uuid())
+  /// Discriminator matching the contract topic: "created" | "withdraw" |
+  /// "cancel" | "register" | "approved" | "revoked".
+  type      String
+  /// On-chain stream id (donation-vault events); null for registry events.
+  streamId  BigInt?  @map("stream_id")
+  /// Ledger sequence number the event was included in.
+  ledger    Int
+  /// Transaction hash that contained the event.
+  txHash    String   @map("tx_hash")
+  /// Full event payload serialised to JSON for auditing and replay.
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([streamId])
+  @@index([type])
+  @@index([ledger])
+  @@map("stream_events")
 }

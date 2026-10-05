@@ -58,6 +58,33 @@ event, not once per batch. Several handlers apply relative deltas
 crash would double-count it. Saving after each event bounds the damage to "at
 most the in-flight event" on a crash.
 
+### Failed events
+
+A handler decodes an event's payload with unchecked casts, so an event whose
+shape does not match what the handler expects throws. That throw used to
+escape the poll loop before the checkpoint was saved, which meant the same
+event came back on the next poll, threw again, and blocked every later event
+behind it — permanently, since re-reading an undecodable event never makes it
+decodable.
+
+Each event is now handled in isolation. A failure is logged, recorded in the
+`indexer_dead_letters` table (keyed on the RPC's event id, with the ledger,
+contract id and the error message), and the checkpoint advances past it as
+normal, so one bad event costs exactly that event rather than the whole
+indexer.
+
+Nothing reads those rows automatically — they exist so a failure is
+inspectable and replayable by hand rather than silently dropped:
+
+```sql
+SELECT event_id, ledger, contract_id, error FROM indexer_dead_letters ORDER BY ledger;
+```
+
+Recording a dead letter is deliberately *not* fault-tolerant. If that write
+throws, the database is unreachable — a transient fault, not a bad event — and
+letting it propagate leaves the checkpoint unmoved so the event is retried on
+the next poll instead of being skipped over a blip.
+
 ### Out-of-window behaviour
 
 The Stellar RPC only retains a sliding window of recent ledgers (typically the
@@ -80,3 +107,35 @@ skipping to ledger <M>. Events in between were missed and will not be indexed.
 
 If you need complete history after an outage longer than the retention window,
 replay the missed ledger range from an archive node (not currently automated).
+
+## Polling and backoff
+
+The indexer polls on a self-rescheduling timer rather than a fixed
+`setInterval`: each poll schedules the next one only once it has settled. Two
+things follow from that. Polls can never overlap, however slow the RPC is. And
+a failed poll decides when the next attempt happens, instead of the interval
+timer firing regardless of how the previous one went.
+
+A healthy indexer polls every `INDEXER_POLL_INTERVAL_MS` (default 5s). When a
+poll fails — `getLatestLedger`, `getEvents`, or a throwing event handler — the
+delay to the next poll doubles, up to a cap of 5 minutes:
+
+| Consecutive failures               | 0  | 1  | 2   | 3   | 4   | 5   | 6    | 7+   |
+| ---------------------------------- | -- | -- | --- | --- | --- | --- | ---- | ---- |
+| Delay (at the default 5s interval) | 5s | 5s | 10s | 20s | 40s | 80s | 160s | 300s |
+
+The first failure retries at the normal interval, so a single dropped request
+costs nothing. The cap matters for two reasons: a long outage must not drift out
+to a delay that looks like a hung indexer, and the indexer still re-checks the
+endpoint at a predictable rate so recovery is detected within the cap.
+
+The counter resets on the first poll that completes, so a single success drops
+the delay straight back to `INDEXER_POLL_INTERVAL_MS` — one bad patch does not
+leave the indexer crawling for the rest of its life.
+
+Failed polls leave the checkpoint where it was, so retries re-scan the same
+ledger range. The log line names the failure count and the next delay:
+
+```
+indexer poll failed (3 in a row) — retrying in 20000ms
+```

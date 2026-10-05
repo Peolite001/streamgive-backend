@@ -1,13 +1,18 @@
-
-import { PrismaClient } from '@prisma/client';
 import { getLatestLedgerSequence, rpcServer } from '../stellar/rpc.js';
 import { getCheckpoint, saveCheckpoint } from './checkpoint.js';
 import { WATCHED_CONTRACT_IDS } from './contracts.js';
+import { recordDeadLetter } from './deadLetter.js';
 
 const POLL_INTERVAL_MS = Number(process.env.INDEXER_POLL_INTERVAL_MS ?? 5000);
 const START_LEDGER = process.env.INDEXER_START_LEDGER
   ? Number(process.env.INDEXER_START_LEDGER)
   : undefined;
+
+/** Ceiling on the backed-off delay. Reached after ~7 consecutive failures at
+ *  the default 5s interval, so a long outage still re-checks the endpoint
+ *  every 5 minutes instead of drifting out to a delay that would look like a
+ *  hung indexer — and so recovery is always detected within the cap. */
+const BACKOFF_MAX_MS = 5 * 60_000;
 
 type GetEventsResult = Awaited<ReturnType<typeof rpcServer.getEvents>>;
 export type ContractEvent = GetEventsResult['events'][number];
@@ -17,6 +22,8 @@ export type EventHandler = (event: ContractEvent) => Promise<void>;
 // the DB just to read the starting point; the source of truth is always
 // the `indexer_checkpoints` row, written after every processed event.
 let lastProcessedLedger: number | undefined;
+export const INDEXER_FAILURE_ESCALATION_THRESHOLD = 5;
+let consecutivePollFailures = 0;
 
 /** The RPC rejects an out-of-window startLedger with JSON-RPC -32600 and a
  *  message naming the range it does serve. There is no dedicated error code
@@ -27,13 +34,43 @@ function isLedgerOutOfRange(err: unknown): boolean {
     err !== null &&
     'message' in err &&
     typeof (err as { message: unknown }).message === 'string' &&
-    (err as { message: string }).message.includes(
-      'startLedger must be within the ledger range',
-    )
+    (err as { message: string }).message.includes('startLedger must be within the ledger range')
   );
 }
 
-async function pollOnce(handleEvent: EventHandler): Promise<void> {
+/**
+ * How long to wait before the poll that follows `consecutiveFailures`
+ * consecutive poll failures.
+ *
+ * Zero failures — the normal case — is just the poll interval. The first
+ * failure also retries at the poll interval, so a single dropped request
+ * costs nothing; from there the delay doubles per failure up to
+ * BACKOFF_MAX_MS. Doubling is what keeps an RPC outage from being a
+ * constant-rate hammer: 5s, 5s, 10s, 20s, 40s, 80s, 160s, 300s, 300s, ...
+ *
+ * Exported for the unit test; the caller resets the counter on success.
+ */
+export function backoffDelayMs(consecutiveFailures: number): number {
+  if (consecutiveFailures <= 0) {
+    return POLL_INTERVAL_MS;
+  }
+
+  // 2 ** n saturates to Infinity long before it overflows, and
+  // Math.min(Infinity, BACKOFF_MAX_MS) is the cap, so a long outage can
+  // never produce a NaN or a nonsensical delay here.
+  return Math.min(
+    POLL_INTERVAL_MS * 2 ** (consecutiveFailures - 1),
+    BACKOFF_MAX_MS,
+  );
+}
+
+/**
+ * Fetches and processes one batch of events, moving the checkpoint forward.
+ *
+ * Exported for the tests; the running indexer drives this from
+ * {@link startIndexer} rather than calling it directly.
+ */
+export async function pollOnce(handleEvent: EventHandler): Promise<void> {
   if (WATCHED_CONTRACT_IDS.length === 0) {
     return;
   }
@@ -106,7 +143,27 @@ async function pollOnce(handleEvent: EventHandler): Promise<void> {
   }
 
   for (const event of events) {
-    await handleEvent(event);
+    try {
+      await handleEvent(event);
+    } catch (err: unknown) {
+      // A handler that throws used to pin the checkpoint: the same event
+      // came back on every poll and nothing after it was ever indexed. The
+      // handlers decode event payloads with unchecked casts, so any event
+      // whose shape doesn't match is permanently poisonous — retrying it
+      // will never succeed, it just stops the indexer making progress.
+      // Record it and carry on instead.
+      //
+      // recordDeadLetter() is deliberately left unguarded. If it throws,
+      // the database is unreachable rather than the event being bad, and
+      // letting that propagate leaves the checkpoint unmoved so the event
+      // is retried on the next poll instead of skipped over a blip.
+      console.error(
+        `indexer: event ${event.id} at ledger ${event.ledger} could not be` +
+          ` processed — recording it as a dead letter and skipping it`,
+        err,
+      );
+      await recordDeadLetter(event, err);
+    }
 
     // Saved per-event, not once per batch: several handlers apply relative
     // deltas (balance -= accrued, etc.), so replaying an already-applied
@@ -120,8 +177,8 @@ async function pollOnce(handleEvent: EventHandler): Promise<void> {
 /**
  * Starts polling for contract events.
  *
- * The returned stop function clears the polling interval and waits for all
- * polls that were already running to finish before resolving.
+ * The returned stop function cancels the pending poll and waits for a poll
+ * that is already running to finish before resolving.
  */
 export function startIndexer(handleEvent: EventHandler): () => Promise<void> {
   if (WATCHED_CONTRACT_IDS.length === 0) {
@@ -133,66 +190,63 @@ export function startIndexer(handleEvent: EventHandler): () => Promise<void> {
     );
   }
 
-  const inFlightPolls = new Set<Promise<void>>();
+  // Each poll schedules the next one only after it settles, rather than
+  // firing on a fixed setInterval. Two things fall out of that: polls can
+  // never overlap however slow an RPC is, and a failing poll controls how
+  // long until the next attempt instead of the interval timer overriding it.
+  let timer: NodeJS.Timeout | undefined;
+  let inFlight: Promise<void> | undefined;
+  let consecutiveFailures = 0;
+  let stopped = false;
 
-  const runPoll = (): void => {
-    const pollPromise = pollOnce(handleEvent).catch((err: unknown) => {
-      console.error('indexer poll failed', err);
-    });
+  function scheduleNextPoll(): void {
+    if (stopped) {
+      return;
+    }
+    const delay = backoffDelayMs(consecutiveFailures);
+    timer = setTimeout(() => {
+      runPoll();
+    }, delay);
+  }
 
-  return () => clearInterval(interval);
-}
+  function runPoll(): void {
+    if (stopped) {
+      return;
+    }
 
+    inFlight = (async () => {
+      try {
+        await pollOnce(handleEvent);
+        consecutiveFailures = 0;
+        consecutivePollFailures = 0;
+      } catch (err: unknown) {
+        consecutiveFailures += 1;
+        consecutivePollFailures += 1;
 
-
-export class EventWorker {
-  constructor(private prisma: PrismaClient) {}
-
-  async processEvent(event: { id: string; type: string; data: any }, currentBlock: number) {
-    // Execute event handling and checkpoint save atomically using prisma.$transaction
-    await this.prisma.$transaction(async (tx) => {
-      // 1. Optional: Check if event was already processed (idempotency guard)
-      // const existing = await tx.processedEvent.findUnique({ where: { id: event.id } });
-      // if (existing) return;
-
-      // 2. Run handler with transaction client
-      if (event.type === 'WITHDRAW') {
-        await this.handleWithdraw(tx, event.data);
-      } else {
-        // Handle other event types with tx
+        if (consecutivePollFailures >= INDEXER_FAILURE_ESCALATION_THRESHOLD) {
+          console.error('indexer poll failure threshold exceeded', {
+            consecutiveFailures: consecutivePollFailures,
+            error: err,
+          });
+        } else {
+          console.error(
+            `indexer poll failed (${consecutiveFailures} in a row) — ` +
+              `retrying in ${backoffDelayMs(consecutiveFailures)}ms`,
+            err,
+          );
+        }
+      } finally {
+        inFlight = undefined;
+        scheduleNextPoll();
       }
-
-      // 3. Save checkpoint within the same transaction
-      await tx.checkpoint.upsert({
-        where: { id: 'singleton' },
-        update: { lastBlock: currentBlock },
-        create: { id: 'singleton', lastBlock: currentBlock },
-      });
-
-      // 4. Mark event as processed (if using processed events table)
-      // await tx.processedEvent.create({ data: { id: event.id } });
-    });
+    })();
   }
 
-  private async handleWithdraw(tx: any, data: { userId: string; amount: number }) {
-    // Apply balance update using transaction client
-    await tx.userBalance.update({
-      where: { userId: data.userId },
-      decrement: { balance: data.amount },
-    });
-  }
+  runPoll();
+
+  return async (): Promise<void> => {
+    stopped = true;
+    clearTimeout(timer);
+    await inFlight;
+  };
 }
-
-// Inside event processing / transaction logic
-await tx.indexerCheckpoint.upsert({
-  where: { id: 'singleton' },
-  update: {
-    lastLedger: event.ledger,
-    lastEventId: event.id, // Save event ID for intra-ledger resumption
-  },
-  create: {
-    id: 'singleton',
-    lastLedger: event.ledger,
-    lastEventId: event.id,
-  },
-});
