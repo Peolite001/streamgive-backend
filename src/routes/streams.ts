@@ -11,7 +11,7 @@ const querySchema = z.object({
     .regex(/^G[A-Z2-7]{55}$/)
     .optional(),
   ngo: z.string().uuid().optional(),
-  // Filter by the NGO's Stellar wallet address instead of its internal UUID.
+  // Filter by the NGO's Stellar wallet address instead of its internal UUIT.
   ngoAddress: z
     .string()
     .regex(/^G[A-Z2-7]{55}$/)
@@ -24,9 +24,15 @@ const querySchema = z.object({
 
 const idParamSchema = z.object({ id: z.string().uuid() });
 
+const activityQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(100),
+  // An event id from a previous page's last item; results start right after it.
+  cursor: z.string().uuid().optional(),
+});
+
 const streamInclude = {
   donor: { select: { address: true } },
-  ngo: { select: { id: true, name: true, ownerAddress: true } },
+  ngo: { select: {id: true, name: true, ownerAddress: true} },
 } as const;
 
 // onChainId is a BigInt; Fastify's default JSON.stringify serializer (no
@@ -38,6 +44,15 @@ function serializeStream<T extends { onChainId: bigint; ngo: { name: string } }>
     ...rest,
     onChainId: onChainId.toString(),
     ngo: { ...ngo, name: ngo.name || null, registered: ngo.name !== '' },
+  };
+}
+
+// ledger is a BigInt and must be stringified the same way as onChainId.
+function serializeStreamEvent<T extends { ledger: bigint | null }>(event: T) {
+  const { ledger, ...rest } = event;
+  return {
+    ...rest,
+    ledger: ledger === null ? null : ledger.toString(),
   };
 }
 
@@ -137,5 +152,42 @@ export async function streamRoutes(app: FastifyInstance): Promise<void> {
       }
 
     return sendPublicCacheable(request, reply, serializeStream(stream));
+  });
+
+  app.get('/streams/:id/activity', async (request, reply) => {
+    const parsedParams = idParamSchema.safeParse(request.params);
+    if (!parsedParams.success) {
+      return reply.code(400).send({ error: 'invalid_request' });
+    }
+
+    const parsedQuery = activityQuerySchema.safeParse(request.query);
+    if (!parsedQuery.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid_request', details: parsedQuery.error.flatten() });
+    }
+
+    const { limit, cursor } = parsedQuery.data;
+
+    const stream = await prisma.stream.findUnique({
+      where: { id: parsedParams.data.id },
+      select: { id: true },
+    });
+
+    if (!stream) {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+
+    const rows = await prisma.streamEvent.findMany({
+      where: { streamId: stream.id },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+    });
+
+    const hasMore = rows.length > limit;
+    const events = hasMore ? rows.slice(0, limit) : rows;
+
+    return { events: events.map(serializeStreamEvent), hasMore };
   });
 }
